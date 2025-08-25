@@ -14,7 +14,7 @@
   "atr_period": 7,
   "ema_fast": 9,
   "ema_slow": 15,
-  "vwap": true,
+  "vwap": false,
   "version": "1.0.0",
   "risk_free_rate_annual": 0.0
 }

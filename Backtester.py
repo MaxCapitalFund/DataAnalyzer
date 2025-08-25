@@ -434,25 +434,71 @@ def run_backtest(tos_csv_path: str,
 # MAIN 
 
 if __name__ == "__main__":
-    # CSV is in the same folder as this script:
-    tos_csv_path = "StrategyReports_MESXCME_81425.csv"
-    ohlcv_csv_path = None  
+    import argparse
+    import glob
+    from pathlib import Path
 
-    cfg = BacktestConfig(
-        strategy_name="SuperSignal_v7",
-        instruments=("/MES",),
-        timeframe="15m",
-        session_hours=("08:30", "15:00"),
-        lookback_months=12,
-        initial_capital=10000.0,
-        commission_per_round_trip=2.02,
-        atr_period=7,
-        ema_fast=9,
-        ema_slow=15,
-        vwap=True,
-        version="1.0.0"
+    parser = argparse.ArgumentParser(
+        description="Run TOS backtest on one or more CSV files."
     )
+    parser.add_argument("--csv", type=str, default="StrategyReports_MESXCME_81425.csv",
+                        help="Path to a TOS Strategy Report CSV, or a glob like 'data/*.csv'.")
+    parser.add_argument("--bars", type=str, default=None,
+                        help="Optional OHLCV CSV for indicators: columns Date,Open,High,Low,Close,Volume.")
+    parser.add_argument("--strategy", type=str, default="SuperSignal_v7",
+                        help="Strategy name label to store in outputs.")
+    parser.add_argument("--timeframe", type=str, default="15m",
+                        help="Timeframe label for outputs (e.g., 15m, 5m, 1h).")
+    parser.add_argument("--capital", type=float, default=10000.0,
+                        help="Initial capital.")
+    parser.add_argument("--commission", type=float, default=2.02,
+                        help="Commission per round trip.")
+    parser.add_argument("--ema_fast", type=int, default=9, help="EMA fast period.")
+    parser.add_argument("--ema_slow", type=int, default=15, help="EMA slow period.")
+    parser.add_argument("--atr_period", type=int, default=7, help="ATR period.")
+    parser.add_argument("--vwap", action="store_true", help="Compute VWAP (requires bars).")
+    parser.add_argument("--outroot", type=str, default=None,
+                        help="Optional override for output root (defaults to CWD/Backtests).")
+    args = parser.parse_args()
 
-    trades_df, metrics = run_backtest(tos_csv_path, cfg, ohlcv_csv_path)
-    print(json.dumps(metrics, indent=2))
-    print(f"\nSaved outputs to: {cfg.outdir()}")
+    # Resolve csv paths (single or many)
+    csv_paths = sorted(glob.glob(args.csv)) if any(ch in args.csv for ch in "*?[]") else [args.csv]
+    if not csv_paths:
+        raise FileNotFoundError(f"No CSV files matched: {args.csv}")
+
+    # Prepare optional bars path
+    ohlcv_csv_path = args.bars if args.bars and os.path.exists(args.bars) else None
+    if args.bars and not ohlcv_csv_path:
+        print(f"[WARN] Bars file not found: {args.bars} (indicators/R-multiple may be NaN)")
+
+    # Run each CSV with its own dated output folder
+    for csv_path in csv_paths:
+        # Build config for this run
+        cfg = BacktestConfig(
+            strategy_name=args.strategy,
+            instruments=("/MES",),               
+            timeframe=args.timeframe,
+            session_hours=("08:30", "15:00"),    
+            lookback_months=12,
+            initial_capital=args.capital,
+            commission_per_round_trip=args.commission,
+            atr_period=args.atr_period,
+            ema_fast=args.ema_fast,
+            ema_slow=args.ema_slow,
+            vwap=args.vwap,
+            version="1.0.0"
+        )
+
+        #override output root
+        if args.outroot:
+            day = datetime.now().strftime("%Y-%m-%d")
+            safe_strategy = cfg.strategy_name.replace(" ", "_")
+            outdir = os.path.join(args.outroot, f"{day}_{safe_strategy}_{cfg.timeframe}")
+            os.makedirs(outdir, exist_ok=True)
+            # Monkey-patch cfg.outdir() to use custom root
+            cfg.outdir = lambda od=outdir: od 
+
+        print(f"\n[RUN] CSV: {csv_path}")
+        trades_df, metrics = run_backtest(csv_path, cfg, ohlcv_csv_path)
+        print(json.dumps(metrics, indent=2))
+        print(f"Saved outputs to: {cfg.outdir()}")
