@@ -1,0 +1,20 @@
+{
+  "strategy_name": "SuperSignal_v7",
+  "instruments": [
+    "/MES"
+  ],
+  "timeframe": "15m",
+  "session_hours": [
+    "08:30",
+    "15:00"
+  ],
+  "lookback_months": 12,
+  "initial_capital": 10000.0,
+  "commission_per_round_trip": 2.02,
+  "atr_period": 7,
+  "ema_fast": 9,
+  "ema_slow": 15,
+  "vwap": true,
+  "version": "1.0.0",
+  "risk_free_rate_annual": 0.0
+}

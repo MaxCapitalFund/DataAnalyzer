@@ -1,0 +1,14 @@
+{
+  "strategy_name": "SuperSignal_v7",
+  "version": "1.0.0",
+  "timeframe": "15m",
+  "initial_capital": 10000.0,
+  "num_trades": 774,
+  "win_rate_pct": 59.56072351421189,
+  "profit_factor": 1.195055593242982,
+  "avg_win_over_avg_loss": 0.8113934938938252,
+  "total_net_profit": 5431.520000000001,
+  "max_drawdown_pct": -10.532702663560645,
+  "expectancy_R": NaN,
+  "per_trade_sharpe": 0.05670659239678214
+}
