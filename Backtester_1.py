@@ -11,6 +11,7 @@
 #     - equity_curve_180d.png
 #     - drawdown_curve.png
 #     - pl_histogram.png
+#     - analytics.md
 
 import os
 import io
@@ -41,7 +42,7 @@ class BacktestConfig:
     commission_per_round_trip: float = 4.04
     # /MES: $5.00 per point per contract
     point_value: float = 5.0
-    version: str = "1.0.2"
+    version: str = "1.0.3"
 
     def outdir(self, csv_stem: str) -> str:
         day = datetime.now().strftime("%Y-%m-%d")
@@ -66,15 +67,7 @@ def _parse_datetime(series: pd.Series) -> pd.Series:
 
 
 def _tag_session(dt: pd.Timestamp) -> str:
-    """Tag by **New York time** (ET). If your CSV timestamps are not ET, align upstream.
-    Bands:
-      - Overnight: 20:00–03:59
-      - Pre: 04:00–09:29
-      - Open: 09:30–10:30
-      - Midday: 10:30–15:00
-      - Late: 15:00–16:00
-      - Post: 16:00–20:00
-    """
+    """Tag by **New York time** (ET). If your CSV timestamps are not ET, align upstream."""
     if pd.isna(dt):
         return "Unknown"
     t = dt.time()
@@ -140,7 +133,6 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     table_str = "".join(lines[start_idx:])
     df = pd.read_csv(io.StringIO(table_str), sep=';')
 
-    # Dates
     if 'Date/Time' in df.columns:
         df['Date'] = _parse_datetime(df['Date/Time'])
     elif 'Date' in df.columns:
@@ -148,7 +140,6 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     else:
         raise ValueError("Could not find 'Date/Time' or 'Date' column.")
 
-    # Monetary fields
     if 'Trade P/L' in df.columns:
         df['TradePL'] = _to_float(df['Trade P/L']).fillna(0.0)
     elif 'TradePL' in df.columns:
@@ -156,13 +147,9 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     else:
         df['TradePL'] = 0.0
 
-    # Cumulative P/L if present (optional)
     df['CumPL'] = _to_float(df['P/L']) if 'P/L' in df.columns else np.nan
-
-    # Strategy label
     df['BaseStrategy'] = df['Strategy'].astype(str).str.split('(').str[0].str.strip() if 'Strategy' in df.columns else "Unknown"
 
-    # Side column
     side_col = None
     for cand in ['Side', 'Action', 'Order', 'Type']:
         if cand in df.columns:
@@ -170,7 +157,6 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
             break
     df['Side'] = df[side_col].astype(str) if side_col else ""
 
-    # Price & Quantity
     if 'Price' not in df.columns:
         df['Price'] = np.nan
     qty_col = 'Quantity' if 'Quantity' in df.columns else ('Qty' if 'Qty' in df.columns else None)
@@ -179,7 +165,6 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     elif 'Qty' not in df.columns:
         df['Qty'] = np.nan
 
-    # Clean
     df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
     return df
 
@@ -189,7 +174,6 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
 # =========================
 
 def build_trades(df: pd.DataFrame) -> pd.DataFrame:
-    """Pair first entry with first subsequent exit per Id; if none, keep close-only rows."""
     id_col = 'Id' if 'Id' in df.columns else None
     trades = []
 
@@ -223,7 +207,6 @@ def build_trades(df: pd.DataFrame) -> pd.DataFrame:
                     'EntrySide': str(entry.get('Side', ''))
                 })
 
-    # Fallback: close-only rows so realized P/L is preserved
     if not trades:
         g = df.sort_values('Date')
         side_up = g['Side'].astype(str).str.upper()
@@ -244,13 +227,11 @@ def build_trades(df: pd.DataFrame) -> pd.DataFrame:
     t = pd.DataFrame(trades).sort_values('ExitTime').reset_index(drop=True)
     t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
 
-    # Commission scales with contracts (uses global cfg)
     qty = pd.to_numeric(t['Qty'], errors='coerce').fillna(1.0).abs()
     t['Commission'] = cfg_global.commission_per_round_trip * qty
     t['NetPL'] = pd.to_numeric(t['TradePL'], errors='coerce').fillna(0.0) - t['Commission']
     t['GrossPL'] = pd.to_numeric(t['TradePL'], errors='coerce').fillna(0.0)
 
-    # Direction inference from EntrySide
     es = t['EntrySide'].astype(str).str.upper()
     t['Direction'] = np.where(es.str.contains('BTO'), 'Long',
                        np.where(es.str.contains('STO'), 'Short', 'Unknown'))
@@ -433,11 +414,128 @@ def save_visuals_and_tables(trades: pd.DataFrame, cfg: BacktestConfig, outdir: s
     monthly.to_csv(os.path.join(outdir, "monthly_performance.csv"))
 
 
+def _fmt(x, p=2, pct=False):
+    try:
+        if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
+            return "n/a"
+        return (f"{x:.{p}f}%" if pct else f"{x:.{p}f}")
+    except Exception:
+        return str(x)
+
+
+def generate_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str) -> None:
+    """Create a one-sheet analytics.md with definitions and the run's actual numbers."""
+    os.makedirs(outdir, exist_ok=True)
+
+    m = metrics
+    def g(key, default=np.nan):
+        return m.get(key, default)
+
+    # Optional monthly preview (last 6 rows)
+    monthly_path = os.path.join(outdir, "monthly_performance.csv")
+    monthly_preview = ""
+    if os.path.exists(monthly_path):
+        try:
+            dfm = pd.read_csv(monthly_path)
+            if 'Unnamed: 0' in dfm.columns:
+                dfm.rename(columns={'Unnamed: 0': 'Month'}, inplace=True)
+            if 'Month' not in dfm.columns:
+                dfm.insert(0, 'Month', dfm.iloc[:,0])
+            dfm = dfm[['Month','NetPL','ReturnPct']].tail(6)
+            lines = ["| Month | NetPL ($) | Return (%) |", "|---|---:|---:|"]
+            for _, r in dfm.iterrows():
+                lines.append(f"| {r['Month']} | {_fmt(r['NetPL'])} | {_fmt(r['ReturnPct'], p=2)} |")
+            monthly_preview = "
+".join(lines)
+        except Exception:
+            monthly_preview = "(Monthly table could not be parsed.)"
+
+    md = f"""
+# Strategy One‑Sheet (Trade Data)
+
+**Strategy:** {g('strategy_name')}  
+**Timeframe:** {g('timeframe')}  
+**Run Date:** {datetime.now().strftime('%Y-%m-%d')}  
+**Session Basis:** New York time (ET) RTH 09:30–16:00  
+**Initial Capital (float):** ${_fmt(g('initial_capital'), 0)}  
+**Commission (RT / contract):** ${_fmt(cfg.commission_per_round_trip, 2)}  
+**Point Value:** ${_fmt(g('point_value'), 2)} per point per contract
+
+---
+
+## Headline KPIs
+- **Net Profit:** ${_fmt(g('net_profit'))}
+- **Total Return:** {_fmt(g('total_return_pct'), pct=True)}
+- **Win Rate:** {_fmt(g('win_rate_pct'), pct=True)}
+- **Profit Factor:** {_fmt(g('profit_factor'))}
+- **Max Drawdown:** ${_fmt(g('max_drawdown_dollars'))} ({_fmt(g('max_drawdown_pct'), pct=True)})
+- **CAGR:** {_fmt(g('CAGR'), pct=True)}
+
+---
+
+## Performance (returns & consistency)
+| Metric | Result | Definition / Formula |
+|---|---:|---|
+| Net Profit ($) | ${_fmt(g('net_profit'))} | Σ(NetPLᵢ) |
+| Total Return (%) | {_fmt(g('total_return_pct'), pct=True)} | (Net Profit ÷ Initial Capital) × 100 |
+| Average Monthly Return | {_fmt(g('avg_monthly_return'), pct=True)} | mean(Monthly equity % change) |
+| CAGR | {_fmt(g('CAGR'), pct=True)} | (Ending Equity ÷ Initial Capital)^(365 ÷ Days) − 1 |
+| Profit Factor | {_fmt(g('profit_factor'))} | (Σ profits) ÷ |Σ losses| |
+| Win Rate (%) | {_fmt(g('win_rate_pct'), pct=True)} | (# wins ÷ total trades) × 100 |
+| Avg Win ($) | ${_fmt(g('avg_win_dollars'))} | mean(NetPL | NetPL>0) |
+| Avg Loss ($) | ${_fmt(g('avg_loss_dollars'))} | mean(NetPL | NetPL<0) |
+| Avg Win (pts / contract) | {_fmt(g('avg_win_points_per_contract'))} | NetPL ÷ (point_value × |Qty|) |
+| Avg Loss (pts / contract) | {_fmt(g('avg_loss_points_per_contract'))} | NetPL ÷ (point_value × |Qty|) |
+| Expectancy per Trade ($) | ${_fmt(g('expectancy_per_trade_dollars'))} | mean(NetPLᵢ) |
+
+---
+
+## Risk (drawdowns & risk‑adjusted)
+| Metric | Result | Definition / Formula |
+|---|---:|---|
+| Max Drawdown ($) | ${_fmt(g('max_drawdown_dollars'))} | max(peak − Equity) |
+| Max Drawdown (%) | {_fmt(g('max_drawdown_pct'), pct=True)} | min(Equity ÷ peak − 1) × 100 |
+| Average Drawdown (%) | {_fmt(g('avg_drawdown_pct'), pct=True)} | mean(Drawdownₜ) × 100 |
+| Recovery Factor | {_fmt(g('recovery_factor'))} | Net Profit ÷ Max DD ($) |
+| Sharpe (per‑trade proxy) | {_fmt(g('per_trade_sharpe_proxy'))} | mean(rᵢ) ÷ stdev(rᵢ) |
+| Sortino (per‑trade proxy) | {_fmt(g('per_trade_sortino_proxy'))} | mean(rᵢ) ÷ stdev(min(rᵢ,0)) |
+| Largest Winning Trade ($) | ${_fmt(g('largest_winning_trade'))} | max(NetPLᵢ) |
+| Largest Losing Trade ($) | ${_fmt(g('largest_losing_trade'))} | min(NetPLᵢ) |
+| Volatility of Trade Returns | {_fmt(g('vol_of_trade_returns'))} | stdev(per‑trade returns) |
+
+---
+
+## Trade Analytics (behavior & cadence)
+| Metric | Result |
+|---|---:|
+| Number of Trades | {int(g('num_trades', 0))} |
+| Long Trades | {int(g('num_longs', 0))} |
+| Short Trades | {int(g('num_shorts', 0))} |
+| Avg Holding Time (minutes) | {_fmt(g('avg_hold_minutes'))} |
+| Session Tags (ET) | Overnight / Pre / Open / Midday / Late / Post |
+
+> For session‑level slicing, use `trades_enriched.csv` (column **Session**).
+
+---
+
+## Visuals & Tables (investor‑friendly)
+- **Equity Curve (last 180 days):** `equity_curve_180d.png`
+- **Drawdown Curve:** `drawdown_curve.png`
+- **Trade P/L Histogram:** `pl_histogram.png`
+- **Monthly Performance Table:** `monthly_performance.csv`
+
+### Monthly Performance Preview (last 6)
+{monthly_preview}
+"""
+    with open(os.path.join(outdir, "analytics.md"), "w", encoding="utf-8") as f:
+        f.write(md)
+
+
 # =========================
 # Runner
 # =========================
 
-def run_backtest(tos_csv_path: str, cfg: BacktestConfig) -> Tuple[pd.DataFrame, dict]:
+def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(tos_csv_path).stem.replace(' ', '_')
     outdir = cfg.outdir(csv_stem)
     os.makedirs(outdir, exist_ok=True)
@@ -459,6 +557,9 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig) -> Tuple[pd.DataFrame, 
 
     # Visuals & tables
     save_visuals_and_tables(trades, cfg, outdir)
+
+    # One-sheet
+    generate_analytics_md(trades, metrics, cfg, outdir)
 
     # Save config
     with open(os.path.join(outdir, "config.json"), "w") as f:
@@ -493,7 +594,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.0.2",
+        version="1.0.3",
     )
 
     print(f"
