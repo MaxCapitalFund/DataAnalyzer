@@ -1,0 +1,103 @@
+# One‑Sheet (Trade Data)
+
+**Strategy:** {{ strategy\_name }}
+**Timeframe:** {{ timeframe }}
+**Instrument(s):** {{ instruments }}
+**Run Date:** {{ run\_date }}
+**Session Basis:** New York time (ET) RTH 09:30–16:00
+**Initial Capital (float):** \${{ initial\_capital }}
+**Commission (RT / contract):** \${{ commission\_per\_round\_trip }}
+**Point Value:** \${{ point\_value }} per point per contract
+
+> Values are produced by the lean analyzer and written to `metrics.json`. Replace the double‑braced placeholders with values from that file (same keys), or wire your script to auto‑render this template.
+
+---
+
+## Headline KPIs
+
+* **Net Profit:** \${{ net\_profit }}
+* **Total Return:** {{ total\_return\_pct }}%
+* **Win Rate:** {{ win\_rate\_pct }}%
+* **Profit Factor:** {{ profit\_factor }}
+* **Max Drawdown:** \${{ max\_drawdown\_dollars }} ({{ max\_drawdown\_pct }}%)
+* **CAGR:** {{ CAGR }}
+
+---
+
+## Performance (returns & consistency)
+
+| Metric                    |                                  Result | Definition / Formula                               |          |   |
+| ------------------------- | --------------------------------------: | -------------------------------------------------- | -------- | - |
+| Net Profit (\$)           |                     \${{ net\_profit }} | Σ(NetPLᵢ)                                          |          |   |
+| Total Return (%)          |               {{ total\_return\_pct }}% | (Net Profit ÷ Initial Capital) × 100               |          |   |
+| Average Monthly Return    |             {{ avg\_monthly\_return }}% | mean(Monthly equity % change)                      |          |   |
+| CAGR                      |                              {{ CAGR }} | (Ending Equity ÷ Initial Capital)^(365 ÷ Days) − 1 |          |   |
+| Profit Factor             |                    {{ profit\_factor }} | (Σ profits) ÷                                      | Σ losses |   |
+| Win Rate (%)              |                   {{ win\_rate\_pct }}% | (# wins ÷ total trades) × 100                      |          |   |
+| Avg Win (\$)              |               \${{ avg\_win\_dollars }} | mean(NetPL                                         | NetPL>0) |   |
+| Avg Loss (\$)             |              \${{ avg\_loss\_dollars }} | mean(NetPL                                         | NetPL<0) |   |
+| Avg Win (pts / contract)  |   {{ avg\_win\_points\_per\_contract }} | NetPL ÷ (point\_value ×                            | Qty      | ) |
+| Avg Loss (pts / contract) |  {{ avg\_loss\_points\_per\_contract }} | NetPL ÷ (point\_value ×                            | Qty      | ) |
+| Expectancy per Trade (\$) | \${{ expectancy\_per\_trade\_dollars }} | mean(NetPLᵢ)                                       |          |   |
+
+---
+
+## Risk (drawdowns & risk‑adjusted)
+
+| Metric                      |                           Result | Definition / Formula         |
+| --------------------------- | -------------------------------: | ---------------------------- |
+| Max Drawdown (\$)           |   \${{ max\_drawdown\_dollars }} | max(peak − Equity)           |
+| Max Drawdown (%)            |        {{ max\_drawdown\_pct }}% | min(Equity ÷ peak − 1) × 100 |
+| Average Drawdown (%)        |        {{ avg\_drawdown\_pct }}% | mean(Drawdownₜ) × 100        |
+| Recovery Factor             |           {{ recovery\_factor }} | Net Profit ÷ Max DD (\$)     |
+| Sharpe (per‑trade proxy)    |  {{ per\_trade\_sharpe\_proxy }} | mean(rᵢ) ÷ stdev(rᵢ)         |
+| Sortino (per‑trade proxy)   | {{ per\_trade\_sortino\_proxy }} | mean(rᵢ) ÷ stdev(min(rᵢ,0))  |
+| Largest Winning Trade (\$)  |  \${{ largest\_winning\_trade }} | max(NetPLᵢ)                  |
+| Largest Losing Trade (\$)   |   \${{ largest\_losing\_trade }} | min(NetPLᵢ)                  |
+| Volatility of Trade Returns |    {{ vol\_of\_trade\_returns }} | stdev(per‑trade returns)     |
+
+---
+
+## Trade Analytics (behavior & cadence)
+
+| Metric                     |                                        Result |
+| -------------------------- | --------------------------------------------: |
+| Number of Trades           |                             {{ num\_trades }} |
+| Long Trades                |                              {{ num\_longs }} |
+| Short Trades               |                             {{ num\_shorts }} |
+| Avg Holding Time (minutes) |                      {{ avg\_hold\_minutes }} |
+| Session Tags (ET)          | Overnight / Pre / Open / Midday / Late / Post |
+
+> For session‑level slicing, use `trades_enriched.csv` (column **Session**).
+
+---
+
+## Visuals & Tables (investor‑friendly)
+
+* **Equity Curve (last 180 days):** `equity_curve_180d.png`
+* **Drawdown Curve:** `drawdown_curve.png`
+* **Trade P/L Histogram:** `pl_histogram.png`
+* **Monthly Performance Table:** `monthly_performance.csv`
+
+### Monthly Performance Preview (last 6)
+
+Paste the last 6 rows of `monthly_performance.csv` here for a quick glance.
+
+```
+Month, NetPL, ReturnPct
+YYYY‑MM, $$$, %
+YYYY‑MM, $$$, %
+YYYY‑MM, $$$, %
+YYYY‑MM, $$$, %
+YYYY‑MM, $$$, %
+YYYY‑MM, $$$, %
+```
+
+---
+
+## Notes
+
+* All timestamps are interpreted in **ET**. If your CSV is not ET, align upstream.
+* **Commissions** are applied per contract using the `Qty` field.
+* Points metrics use `point_value = {{ point_value }}` (default 5.0 for /MES).
+* This sheet mirrors keys from `metrics.json` so it can be auto‑rendered after each run.
