@@ -181,11 +181,17 @@ def build_trades(df: pd.DataFrame) -> pd.DataFrame:
         return pd.to_numeric(x, errors='coerce')
 
     if id_col:
+        # Pair by Id groups
         for tid, grp in df.groupby(id_col, sort=False):
             g = grp.sort_values('Date').copy()
             side_up = g['Side'].astype(str).str.upper()
-            g['is_open']  = side_up.str.contains(r'(BTO|STO|OPEN)',  regex=True)
-            g['is_close'] = side_up.str.contains(r'(STC|BTC|CLOSE)', regex=True)
+
+            # non-capturing groups to avoid UserWarning
+            open_mask  = side_up.str.contains(r'\b(?:BTO|BUY TO OPEN|STO|SELL TO OPEN|OPEN)\b',  regex=True, na=False)
+            close_mask = side_up.str.contains(r'\b(?:STC|SELL TO CLOSE|BTC|BUY TO CLOSE|CLOSE)\b', regex=True, na=False)
+
+            g['is_open']  = open_mask
+            g['is_close'] = close_mask
 
             entry_rows = g[g['is_open']]
             close_rows = g[g['is_close']]
@@ -207,10 +213,12 @@ def build_trades(df: pd.DataFrame) -> pd.DataFrame:
                     'EntrySide': str(entry.get('Side', ''))
                 })
 
+    # Fallback: if no Ids/pairs, treat each close as a completed trade row
     if not trades:
-        g = df.sort_values('Date')
+        g = df.sort_values('Date').copy()
         side_up = g['Side'].astype(str).str.upper()
-        close_rows = g[side_up.str.contains(r'(STC|BTC|CLOSE)', regex=True)]
+        close_mask = side_up.str.contains(r'\b(?:STC|SELL TO CLOSE|BTC|BUY TO CLOSE|CLOSE)\b', regex=True, na=False)
+        close_rows = g[close_mask]
         for _, row in close_rows.iterrows():
             trades.append({
                 'Id': row.get('Id', np.nan),
@@ -221,10 +229,18 @@ def build_trades(df: pd.DataFrame) -> pd.DataFrame:
                 'Qty': _safe_num(row.get('Qty')),
                 'TradePL': _safe_num(row.get('TradePL')),
                 'BaseStrategy': row.get('BaseStrategy', 'Unknown'),
-                'EntrySide': ''
+                'EntrySide': str(row.get('Side', ''))
             })
 
-    t = pd.DataFrame(trades).sort_values('ExitTime').reset_index(drop=True)
+    t = pd.DataFrame(trades)
+    if t.empty:
+        # nothing matched — avoid downstream KeyErrors
+        return t.assign(
+            HoldMins=np.nan, Commission=np.nan, NetPL=np.nan, GrossPL=np.nan,
+            Direction=""
+        )
+
+    t = t.sort_values('ExitTime').reset_index(drop=True)
     t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
 
     qty = pd.to_numeric(t['Qty'], errors='coerce').fillna(1.0).abs()
@@ -233,10 +249,10 @@ def build_trades(df: pd.DataFrame) -> pd.DataFrame:
     t['GrossPL'] = pd.to_numeric(t['TradePL'], errors='coerce').fillna(0.0)
 
     es = t['EntrySide'].astype(str).str.upper()
-    t['Direction'] = np.where(es.str.contains('BTO'), 'Long',
-                       np.where(es.str.contains('STO'), 'Short', 'Unknown'))
-
+    t['Direction'] = np.where(es.str.contains(r'\bBTO\b|BUY TO OPEN', regex=True), 'Long',
+                       np.where(es.str.contains(r'\bSTO\b|SELL TO OPEN', regex=True), 'Short', 'Unknown'))
     return t
+
 
 
 # =========================
@@ -445,8 +461,7 @@ def generate_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConf
             lines = ["| Month | NetPL ($) | Return (%) |", "|---|---:|---:|"]
             for _, r in dfm.iterrows():
                 lines.append(f"| {r['Month']} | {_fmt(r['NetPL'])} | {_fmt(r['ReturnPct'], p=2)} |")
-            monthly_preview = "
-".join(lines)
+            monthly_preview = "\n".join(lines)
         except Exception:
             monthly_preview = "(Monthly table could not be parsed.)"
 
@@ -597,8 +612,7 @@ if __name__ == "__main__":
         version="1.0.3",
     )
 
-    print(f"
-[RUN] CSV: {args.csv}")
+    print(f"[RUN] CSV: {args.csv}")
     trades_df, metrics = run_backtest(args.csv, cfg_global)
     print(json.dumps(metrics, indent=2))
     print(f"Saved outputs to: {cfg_global.outdir(Path(args.csv).stem.replace(' ', '_'))}")
