@@ -41,6 +41,20 @@
 #     - drawdown_curve.png
 #     - pl_histogram.png
 #     - analytics.md
+# trading_report_analyzer_lean.py
+# Purpose: Lean, investor-friendly analysis of ThinkorSwim Strategy Report CSVs
+# Scope: TRADE DATA ONLY (no EMA/VWAP/ATR). Focus on P/L, risk, trade analytics, visuals.
+# Session basis: **New York time (ET)** RTH 09:30–16:00.
+# Capital float: $2,500 (1 contract). Commission: $4.04 round trip per contract. Point value: $5.00/pt.
+# Outputs (per run):
+#   Backtests/<YYYY-MM-DD>_<Strategy>_<Timeframe>_<CSVStem>/
+#     - trades_enriched.csv
+#     - metrics.json
+#     - monthly_performance.csv
+#     - equity_curve_180d.png
+#     - drawdown_curve.png
+#     - pl_histogram.png
+#     - analytics.md
 
 import os
 import io
