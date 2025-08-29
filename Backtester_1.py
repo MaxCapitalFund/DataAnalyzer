@@ -527,7 +527,7 @@ def generate_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConf
 
 ---
 
-## Headline KPIs
+## Key Performance Indicators (KPI's)
 - **Net Profit:** ${_fmt(g('net_profit'))}
 - **Total Return:** {_fmt(g('total_return_pct'), pct=True)}
 - **Win Rate:** {_fmt(g('win_rate_pct'), pct=True)}
