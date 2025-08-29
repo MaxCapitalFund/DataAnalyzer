@@ -12,31 +12,21 @@
 #     - drawdown_curve.png
 #     - pl_histogram.png
 #     - analytics.md
-
+#
 # ---- CHANGELOG ----
 # v1.0.4 (2025-08-29)
 # NEW
 # - ExitReason tagging added (Target / Stop / Time / Manual / Close) derived from exit-row text.
 # - New columns in trades_enriched.csv: ExitSide, ExitReason.
-# - Exit-method analytics added to metrics.json:
-#     - exit_reason_counts
-#     - exit_reason_avg_netpl
-#     - exit_reason_profit_factor
+# - Exit-method analytics added to metrics.json: exit_reason_counts, exit_reason_avg_netpl, exit_reason_profit_factor.
 # - "Exit Method Breakdown" section added to analytics.md.
-#
 # IMPROVEMENTS
 # - Direction inference hardened: BTO => Long, STO => Short (supports BUY_TO_OPEN, SELL_TO_OPEN, SELL SHORT, etc.).
-# - Percentage rendering fixed in analytics.md: CAGR and Average Monthly Return now displayed as percentages.
-# - Monthly preview generation fixed (proper newline join) and resilient CSV parsing for monthly_performance.csv.
-# - Regex boundaries cleaned (uses \b), NA-safe matching, broader open/close variants (e.g., BOT TO OPEN, SLD TO CLOSE).
+# - Percentage rendering fixed in analytics.md (CAGR & Avg Monthly as percentages).
+# - Monthly preview generation fixed (proper newline join) and resilient CSV parsing.
+# - Regex boundaries cleaned (uses \b), NA-safe matching, broader open/close variants.
 # - CLI output tidy; version bumped to 1.0.4.
-#
-# CONSTANTS / ASSUMPTIONS (unchanged)
-# - Session basis: ET RTH 09:30–16:00.
-# - Initial capital: $2,500 (1-contract float).
-# - Commission: $4.04 round trip per contract.
-# - Point value: $5.00 per point per contract.
-# --------------------
+# -------------------
 
 import os
 import io
@@ -221,8 +211,8 @@ def build_trades(df: pd.DataFrame) -> pd.DataFrame:
 
     if id_col:
         # Regex variants to capture typical TOS wording/underscores
-        OPEN_RX  = r"(?:BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN|STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT|OPEN)"
-        CLOSE_RX = r"(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)"
+        OPEN_RX  = r"\b(?:BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN|STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT|OPEN)\b"
+        CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)\b"
 
         for tid, grp in df.groupby(id_col, sort=False):
             g = grp.sort_values('Date').copy()
@@ -256,7 +246,7 @@ def build_trades(df: pd.DataFrame) -> pd.DataFrame:
     if not trades:
         g = df.sort_values('Date').copy()
         side_up = g['Side'].astype(str).str.upper()
-        CLOSE_RX = r"(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)"
+        CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)\b"
         close_rows = g[side_up.str.contains(CLOSE_RX, regex=True, na=False)]
         for _, row in close_rows.iterrows():
             trades.append({
@@ -285,14 +275,16 @@ def build_trades(df: pd.DataFrame) -> pd.DataFrame:
     t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
 
     qty = pd.to_numeric(t['Qty'], errors='coerce').fillna(1.0).abs()
-    t['Commission'] = cfg_global.commission_per_round_trip * qty
+    # Commission from global cfg; fall back to 0.0 if not set
+    commission_rt = getattr(globals().get('cfg_global', object()), 'commission_per_round_trip', 0.0)
+    t['Commission'] = commission_rt * qty
     t['NetPL'] = pd.to_numeric(t['TradePL'], errors='coerce').fillna(0.0) - t['Commission']
     t['GrossPL'] = pd.to_numeric(t['TradePL'], errors='coerce').fillna(0.0)
 
     es = t['EntrySide'].astype(str).str.upper()
     t['Direction'] = np.where(
-        es.str.contains(r"(BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN)", regex=True, na=False), 'Long',
-        np.where(es.str.contains(r"(STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT)", regex=True, na=False), 'Short', 'Unknown')
+        es.str.contains(r"\b(BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN)\b", regex=True, na=False), 'Long',
+        np.where(es.str.contains(r"\b(STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT)\b", regex=True, na=False), 'Short', 'Unknown')
     )
 
     return t
@@ -517,8 +509,7 @@ def generate_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConf
             lines = ["| Month | NetPL ($) | Return (%) |", "|---|---:|---:|"]
             for _, r in dfm.iterrows():
                 lines.append(f"| {r['Month']} | {_fmt(r['NetPL'])} | {_fmt(r['ReturnPct'], p=2)} |")
-            monthly_preview = "
-".join(lines)
+            monthly_preview = "\n".join(lines)
         except Exception:
             monthly_preview = "(Monthly table could not be parsed.)"
 
@@ -584,11 +575,7 @@ def generate_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConf
             avg = m.get('exit_reason_avg_netpl', {}).get(r, np.nan)
             pf  = m.get('exit_reason_profit_factor', {}).get(r, np.nan)
             lines.append(f"| {r} | {int(n)} | {_fmt(avg)} | {_fmt(pf)} |")
-        md += "
-" + "
-".join(lines) + "
-
-"
+        md += "\n" + "\n".join(lines) + "\n\n"
 
     md += f"""
 ---
@@ -615,7 +602,6 @@ def generate_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConf
 ### Monthly Performance Preview (last 6)
 {monthly_preview}
 """
-
     with open(os.path.join(outdir, "analytics.md"), "w", encoding="utf-8") as f:
         f.write(md)
 
@@ -690,4 +676,3 @@ if __name__ == "__main__":
     trades_df, metrics = run_backtest(args.csv, cfg_global)
     print(json.dumps(metrics, indent=2))
     print(f"Saved outputs to: {cfg_global.outdir(Path(args.csv).stem.replace(' ', '_'))}")
-v).stem.replace(' ', '_'))}")}
