@@ -27,6 +27,20 @@
 # - Regex boundaries cleaned (uses \b), NA-safe matching, broader open/close variants.
 # - CLI output tidy; version bumped to 1.0.4.
 # -------------------
+# trading_report_analyzer_lean.py
+# Purpose: Lean, investor-friendly analysis of ThinkorSwim Strategy Report CSVs
+# Scope: TRADE DATA ONLY (no EMA/VWAP/ATR). Focus on P/L, risk, trade analytics, visuals.
+# Session basis: **New York time (ET)** RTH 09:30–16:00.
+# Capital float: $2,500 (1 contract). Commission: $4.04 round trip per contract. Point value: $5.00/pt.
+# Outputs (per run):
+#   Backtests/<YYYY-MM-DD>_<Strategy>_<Timeframe>_<CSVStem>/
+#     - trades_enriched.csv
+#     - metrics.json
+#     - monthly_performance.csv
+#     - equity_curve_180d.png
+#     - drawdown_curve.png
+#     - pl_histogram.png
+#     - analytics.md
 
 import os
 import io
@@ -275,9 +289,7 @@ def build_trades(df: pd.DataFrame) -> pd.DataFrame:
     t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
 
     qty = pd.to_numeric(t['Qty'], errors='coerce').fillna(1.0).abs()
-    # Commission from global cfg; fall back to 0.0 if not set
-    commission_rt = getattr(globals().get('cfg_global', object()), 'commission_per_round_trip', 0.0)
-    t['Commission'] = commission_rt * qty
+    t['Commission'] = cfg_global.commission_per_round_trip * qty
     t['NetPL'] = pd.to_numeric(t['TradePL'], errors='coerce').fillna(0.0) - t['Commission']
     t['GrossPL'] = pd.to_numeric(t['TradePL'], errors='coerce').fillna(0.0)
 
@@ -575,9 +587,7 @@ def generate_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConf
             avg = m.get('exit_reason_avg_netpl', {}).get(r, np.nan)
             pf  = m.get('exit_reason_profit_factor', {}).get(r, np.nan)
             lines.append(f"| {r} | {int(n)} | {_fmt(avg)} | {_fmt(pf)} |")
-        md += "\n" + "\n".join(lines) + "\n\n"
-
-    md += f"""
+        md += "\n" + "\n".join(lines) + "\n\n"md += f"""
 ---
 
 ## Trade Analytics (behavior & cadence)
@@ -602,6 +612,7 @@ def generate_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConf
 ### Monthly Performance Preview (last 6)
 {monthly_preview}
 """
+
     with open(os.path.join(outdir, "analytics.md"), "w", encoding="utf-8") as f:
         f.write(md)
 
