@@ -647,11 +647,15 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
 # CLI
 # =========================
 if __name__ == "__main__":
-    import argparse
+    import argparse, glob, sys
 
     parser = argparse.ArgumentParser(description="Lean analysis of TOS Strategy Report CSV (trade data only).")
-    parser.add_argument("--csv", type=str, default="StrategyReports_MESXCME_81425.csv",
-                        help="Path to a TOS Strategy Report CSV.")
+    parser.add_argument(
+        "--csv",
+        nargs="+",                              # <-- accept 1..N items
+        required=True,
+        help="Path(s) or globs for TOS Strategy Report CSV(s). Examples: file.csv  StrategyReports/*.csv  'StrategyReports/*.csv'"
+    )
     parser.add_argument("--strategy", type=str, default="SuperSignal_v7", help="Strategy name label.")
     parser.add_argument("--timeframe", type=str, default="15m", help="Timeframe label for outputs.")
     parser.add_argument("--capital", type=float, default=2500.0, help="Initial capital (1-contract float).")
@@ -659,6 +663,23 @@ if __name__ == "__main__":
     parser.add_argument("--point_value", type=float, default=5.0, help="Dollars per index point per contract (e.g., /MES = 5.0)")
 
     args = parser.parse_args()
+
+    # Resolve CSVs: support shell-expanded lists, quoted globs, and direct paths
+    resolved = []
+    for item in args.csv:
+        # if user passed a glob literally (e.g., "StrategyReports/*.csv"), expand it here
+        matches = glob.glob(item)
+        if matches:
+            resolved.extend(matches)
+        else:
+            # not a glob or no matches; treat as a path (error later if missing)
+            resolved.append(item)
+
+    # normalize, dedupe, sort, and ensure they exist
+    csv_paths = sorted({str(Path(p)) for p in resolved if Path(p).exists()})
+    if not csv_paths:
+        print(f"[ERROR] No CSV files matched any of: {args.csv}", file=sys.stderr)
+        sys.exit(1)
 
     # global config (used in build_trades for commission)
     global cfg_global
@@ -672,7 +693,21 @@ if __name__ == "__main__":
         version="1.0.4",
     )
 
-    print(f"[RUN] CSV: {args.csv}")
-    trades_df, metrics = run_backtest(args.csv, cfg_global)
-    print(json.dumps(metrics, indent=2))
-    print(f"Saved outputs to: {cfg_global.outdir(Path(args.csv).stem.replace(' ', '_'))}")
+    # Run each CSV
+    all_metrics = []
+    for csv_path in csv_paths:
+        print(f"\n[RUN] CSV: {csv_path}")
+        trades_df, metrics = run_backtest(csv_path, cfg_global)
+        metrics["csv"] = str(Path(csv_path).name)
+        print(json.dumps(metrics, indent=2))
+        print(f"Saved outputs to: {cfg_global.outdir(Path(csv_path).stem.replace(' ', '_'))}")
+        all_metrics.append(metrics)
+
+    # Optional: write a summary CSV at the repo root
+    try:
+        import pandas as pd
+        if all_metrics:
+            pd.DataFrame(all_metrics).to_csv("Backtests_summary_metrics.csv", index=False)
+            print("\n[OK] Wrote Backtests_summary_metrics.csv")
+    except Exception as e:
+        print(f"[WARN] Could not write summary metrics: {e}")

@@ -1,0 +1,40 @@
+{
+  "strategy_name": "SuperSignal_v7",
+  "version": "1.0.4",
+  "timeframe": "15m",
+  "initial_capital": 2500.0,
+  "point_value": 5.0,
+  "num_trades": 774,
+  "net_profit": 3868.04,
+  "total_return_pct": 154.7216,
+  "avg_monthly_return": 0.1491308804851322,
+  "CAGR": 2.734692549714527,
+  "profit_factor": 1.1357774424329607,
+  "win_rate_pct": 58.52713178294574,
+  "avg_win_dollars": 71.42633554083886,
+  "avg_loss_dollars": -88.74794392523364,
+  "avg_win_points_per_contract": 14.285267108167774,
+  "avg_loss_points_per_contract": -17.74958878504673,
+  "expectancy_per_trade_dollars": 4.997467700258398,
+  "max_drawdown_pct": 41.886711117235734,
+  "max_drawdown_dollars": 1546.6999999999962,
+  "avg_drawdown_pct": -11.080144540807515,
+  "recovery_factor": 2.5008340337492787,
+  "per_trade_sharpe_proxy": 0.0403834226246887,
+  "per_trade_sortino_proxy": 0.05948694495867214,
+  "largest_winning_trade": 672.21,
+  "largest_losing_trade": -687.79,
+  "vol_of_trade_returns": 0.04950018968628141,
+  "num_longs": 0,
+  "num_shorts": 0,
+  "avg_hold_minutes": NaN,
+  "exit_reason_counts": {
+    "Close": 774
+  },
+  "exit_reason_avg_netpl": {
+    "Close": 4.997467700258398
+  },
+  "exit_reason_profit_factor": {
+    "Close": 1.1357774424329607
+  }
+}
