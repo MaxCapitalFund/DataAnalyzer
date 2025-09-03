@@ -13,6 +13,8 @@
 #     - drawdown_curve.png (RTH-only)
 #     - pl_histogram.png (RTH-only)
 #     - analytics.md (RTH-only KPIs + notes)
+#     - dow_kpis.csv, hold_kpis.csv, session_kpis.csv
+#     - heatmap_dow_hour_count.png
 #     - config.json
 #
 # ---- CHANGELOG ----
@@ -23,6 +25,8 @@
 # - One-Sheet: Exit Method Breakdown and Long vs Short Breakdown sections added.
 # - Preserves signed Qty; uses QtyAbs for commissions/normalization; adds AmountExit & PositionAfterExit.
 # - Session buckets: PRE(03:00–09:29), OPEN(09:30–11:30), LUNCH(11:30–14:00), CLOSING(14:00–16:00).
+# - NEW: DOW KPIs, Hold-time KPIs, low-N flags, DOW×Hour heatmap, KPI ratios, MD references.
+# - FIX: Regex capture groups for symbol extraction; safer RTH filter fallback; monthly resample 'ME'.
 # -------------------
 
 import os
@@ -130,6 +134,35 @@ def _exit_reason(text: str) -> str:
     if any(w in s for w in ["MANUAL", "FLATTEN", "MKT CLOSE", "DISCRETIONARY"]): return "Manual"
     return "Close"
 
+# ---- Segmentation helpers ----
+WEEKDAY_ORDER = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+MIN_SAMPLE_PER_SEGMENT = 30  # doc: "Ensure ≥30 trades per segment"
+
+def _with_dow(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out['DOW'] = pd.to_datetime(out['ExitTime'], errors='coerce').dt.day_name()
+    out['DOW'] = pd.Categorical(out['DOW'], categories=WEEKDAY_ORDER, ordered=True)
+    return out
+
+def _with_hold_buckets(df: pd.DataFrame) -> pd.DataFrame:
+    bins   = [0, 5, 15, 30, 60, 120, np.inf]
+    labels = ['<=5m','5–15m','15–30m','30–60m','60–120m','>120m']
+    out = df.copy()
+    out['HoldBucket'] = pd.cut(out['HoldMins'], bins=bins, labels=labels, right=True, include_lowest=True)
+    return out
+
+def _kpi_table(series_pl: pd.Series) -> dict:
+    """Return basic KPIs for a slice (sum, count, mean, win rate, profit factor)."""
+    s = series_pl.dropna()
+    if s.empty:
+        return {"count": 0, "sum": 0.0, "mean": np.nan, "win_rate_pct": np.nan, "profit_factor": np.nan}
+    return {
+        "count": int(s.size),
+        "sum": float(s.sum()),
+        "mean": float(s.mean()),
+        "win_rate_pct": float((s > 0).mean() * 100.0),
+        "profit_factor": _profit_factor(s),
+    }
 
 # =========================
 # Load & Clean (TOS Strategy Report)
@@ -209,7 +242,7 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     else:
         # Try to infer from Strategy text, e.g., contains "/MES"
         s = df['Strategy'].astype(str) if 'Strategy' in df.columns else pd.Series([], dtype=str)
-        pat = re.compile(r"/(?:[A-Z]{2,5})")
+        pat = re.compile(r"/([A-Z]{2,5})")  # FIX: capturing group for str.extract
         df['Symbol'] = s.str.extract(pat, expand=False)
 
     # Preserve optional fields if present
@@ -433,12 +466,16 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
     # Monthly & CAGR (Net equity)
     dt = pd.to_datetime(df['ExitTime'], errors='coerce')
     eq_df = pd.DataFrame({'dt': dt, 'equity': equity})
-    eq_month = eq_df.dropna(subset=['dt']).set_index('dt').resample('M').last()
+    eq_month = eq_df.dropna(subset=['dt']).set_index('dt').resample('ME').last()  # 'ME' month-end
     monthly_ret = eq_month['equity'].pct_change()
     avg_monthly_return = float(monthly_ret.mean()) if monthly_ret.notna().any() else np.nan
 
     ending_equity = float(equity.iloc[-1]) if len(equity) else cfg.initial_capital
-    CAGR = float((ending_equity / cfg.initial_capital) ** (365.0 / days) - 1.0) if days and days > 0 else np.nan
+    CAGR = np.nan
+    if days and days > 0 and cfg.initial_capital and cfg.initial_capital > 0:
+        ratio = ending_equity / cfg.initial_capital
+        if ratio > 0:
+            CAGR = float(np.power(ratio, 365.0 / days) - 1.0)
 
     # Direction counts
     num_longs  = int((df['Direction'] == 'Long').sum()) if 'Direction' in df.columns else 0
@@ -493,6 +530,21 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
         "num_shorts": num_shorts,
         "avg_hold_minutes": float(df['HoldMins'].mean()) if 'HoldMins' in df.columns else np.nan,
     }
+
+    # Ratios requested by doc
+    try:
+        metrics["avg_win_over_avg_loss"] = (
+            float(avg_win / abs(avg_loss)) if (isinstance(avg_loss, float) and avg_loss < 0) else np.nan
+        )
+    except Exception:
+        metrics["avg_win_over_avg_loss"] = np.nan
+
+    try:
+        metrics["largest_win_over_largest_loss"] = (
+            float(largest_win / abs(largest_loss)) if (isinstance(largest_loss, float) and largest_loss < 0) else np.nan
+        )
+    except Exception:
+        metrics["largest_win_over_largest_loss"] = np.nan
 
     # Direction splits (RTH)
     if 'Direction' in df.columns:
@@ -578,9 +630,88 @@ def save_visuals_and_tables(trades_rth: pd.DataFrame, cfg: BacktestConfig, outdi
     # Monthly performance table (RTH only)
     dt = pd.to_datetime(trades_rth['ExitTime'], errors='coerce')
     monthly = pd.DataFrame({'NetPL': trades_rth['NetPL'].values}, index=dt)
-    monthly = monthly.dropna().resample('M').sum()
+    monthly = monthly.dropna().resample('ME').sum()  # month-end
     monthly['ReturnPct'] = monthly['NetPL'] / cfg.initial_capital * 100.0
     monthly.to_csv(os.path.join(outdir, "monthly_performance.csv"))
+
+
+def save_segment_tables_and_heatmap(trades_rth: pd.DataFrame, cfg: BacktestConfig, outdir: str) -> None:
+    """
+    Saves:
+      - dow_kpis.csv
+      - hold_kpis.csv
+      - session_kpis.csv
+      - heatmap_dow_hour_count.png (trade distribution)
+    Flags low sample sizes (N < MIN_SAMPLE_PER_SEGMENT).
+    """
+    os.makedirs(outdir, exist_ok=True)
+    df = trades_rth.copy()
+    if df.empty:
+        return
+    
+    # Day-of-week KPIs (stable DataFrame return)
+    d_dow = _with_dow(df)
+    if 'DOW' in d_dow.columns:
+        g = d_dow.groupby('DOW', observed=True)['NetPL']
+        dow_tbl = pd.DataFrame({
+            'count': g.size(),
+            'sum': g.sum(min_count=1),
+            'mean': g.mean(),
+            'win_rate_pct': g.apply(lambda s: (s > 0).mean() * 100.0 if len(s) else np.nan),
+            'profit_factor': g.apply(_profit_factor),
+        })
+        # keep weekday order rows even if missing
+        dow_tbl = dow_tbl.reindex(WEEKDAY_ORDER)
+        # flag low N
+        dow_tbl['low_sample_flag'] = dow_tbl['count'].fillna(0) < MIN_SAMPLE_PER_SEGMENT
+        dow_tbl.to_csv(os.path.join(outdir, "dow_kpis.csv"))
+
+# Hold-time buckets KPIs
+    d_hold = _with_hold_buckets(df)
+    if 'HoldBucket' in d_hold.columns:
+        g = d_hold.groupby('HoldBucket', observed=True)['NetPL']
+        hold_tbl = pd.DataFrame({
+            'count': g.size(),
+            'sum': g.sum(min_count=1),
+            'mean': g.mean(),
+            'win_rate_pct': g.apply(lambda s: (s > 0).mean() * 100.0 if len(s) else np.nan),
+            'profit_factor': g.apply(_profit_factor),
+        })
+        # ensure buckets show up even if empty
+        hold_tbl = hold_tbl.reindex(d_hold['HoldBucket'].cat.categories)
+        hold_tbl['low_sample_flag'] = hold_tbl['count'].fillna(0) < MIN_SAMPLE_PER_SEGMENT
+        hold_tbl.to_csv(os.path.join(outdir, "hold_kpis.csv"))
+
+        # Session KPIs
+    if 'Session' in df.columns:
+        g = df.groupby('Session')['NetPL']
+        sess_tbl = pd.DataFrame({
+            'count': g.size(),
+            'sum': g.sum(min_count=1),
+            'mean': g.mean(),
+            'win_rate_pct': g.apply(lambda s: (s > 0).mean() * 100.0 if len(s) else np.nan),
+            'profit_factor': g.apply(_profit_factor),
+        })
+        sess_tbl['low_sample_flag'] = sess_tbl['count'].fillna(0) < MIN_SAMPLE_PER_SEGMENT
+        sess_tbl.to_csv(os.path.join(outdir, "session_kpis.csv"))
+
+    # Heatmap: trade count by (DOW x ExitHour)
+    dt = pd.to_datetime(df['ExitTime'], errors='coerce')
+    df['ExitHour'] = dt.dt.hour
+    d_heat = _with_dow(df.dropna(subset=['ExitHour']))
+    if not d_heat.empty:
+        pivot_counts = d_heat.pivot_table(index='DOW', columns='ExitHour', values='NetPL', aggfunc='size', fill_value=0)
+        pivot_counts = pivot_counts.reindex(WEEKDAY_ORDER)
+        plt.figure(figsize=(10, 4.5))
+        plt.imshow(pivot_counts.values, aspect='auto', interpolation='nearest')
+        plt.colorbar(label='Trade Count')
+        plt.yticks(range(len(pivot_counts.index)), list(pivot_counts.index))
+        plt.xticks(range(len(pivot_counts.columns)), list(pivot_counts.columns), rotation=0)
+        plt.xlabel("Hour of Day (ET)")
+        plt.title("Trade Distribution Heatmap (Count) — DOW × Hour [RTH]")
+        plt.tight_layout()
+        plt.savefig(os.path.join(outdir, "heatmap_dow_hour_count.png"), dpi=160)
+        plt.close()
 
 
 def _fmt(x, p=2, pct=False):
@@ -661,6 +792,8 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 | Avg Loss ($, Net) | ${_fmt(g('avg_loss_dollars'))} | mean(NetPL | NetPL<0) |
 | Avg Win ($, Gross) | ${_fmt(g('avg_win_dollars_gross'))} | mean(GrossPL | GrossPL>0) |
 | Avg Loss ($, Gross) | ${_fmt(g('avg_loss_dollars_gross'))} | mean(GrossPL | GrossPL<0) |
+| **Avg Win ÷ Avg Loss** | {_fmt(g('avg_win_over_avg_loss'))} | |Avg Win| ÷ |Avg Loss| (Net) |
+| **Largest Win ÷ Largest Loss** | {_fmt(g('largest_win_over_largest_loss'))} | |Largest Win| ÷ |Largest Loss| (Net) |
 | Avg Win (pts / contract) | {_fmt(g('avg_win_points_per_contract'))} | NetPL ÷ (point_value × |Qty|) |
 | Avg Loss (pts / contract) | {_fmt(g('avg_loss_points_per_contract'))} | NetPL ÷ (point_value × |Qty|) |
 | Expectancy per Trade ($, Net) | ${_fmt(g('expectancy_per_trade_dollars'))} | mean(NetPLᵢ) |
@@ -702,22 +835,15 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 
 ---
 
-## Trade Analytics (behavior & cadence)
-| Metric | Result |
-|---|---:|
-| Number of Trades (RTH) | {int(g('num_trades', 0))} |
-| Long Trades | {int(g('num_longs', 0))} |
-| Short Trades | {int(g('num_shorts', 0))} |
-| Avg Holding Time (minutes) | {_fmt(g('avg_hold_minutes'))} |
-| Session Tags (in trades_enriched.csv) | PRE / OPEN / LUNCH / CLOSING |
-
----
-
 ## Visuals & Tables (investor-friendly)
 - **Equity Curve (last 180 days):** `equity_curve_180d.png`
 - **Drawdown Curve:** `drawdown_curve.png`
 - **Trade P/L Histogram:** `pl_histogram.png`
 - **Monthly Performance Table:** `monthly_performance.csv`
+- **DOW KPIs:** `dow_kpis.csv` (flags rows with low sample size < {MIN_SAMPLE_PER_SEGMENT})
+- **Hold-Time KPIs:** `hold_kpis.csv` (flags rows with low sample size < {MIN_SAMPLE_PER_SEGMENT})
+- **Session KPIs:** `session_kpis.csv` (flags rows with low sample size < {MIN_SAMPLE_PER_SEGMENT})
+- **Trade Distribution Heatmap (Count):** `heatmap_dow_hour_count.png`
 
 ### Monthly Performance Preview (last 6)
 {monthly_preview}
@@ -760,8 +886,14 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     trades_out = os.path.join(outdir, "trades_enriched.csv")
     trades_all.to_csv(trades_out, index=False)
 
-    # RTH subset (EntryTime within 09:30–16:00 ET)
-    trades_rth = trades_all[trades_all['EntryTime'].apply(_in_rth)].copy()
+    # RTH subset (EntryTime within 09:30–16:00 ET), fall back to ExitTime if EntryTime is NaT
+    def _rth_row(row):
+        t = row['EntryTime']
+        if pd.isna(t):
+            t = row.get('ExitTime')
+        return _in_rth(t)
+
+    trades_rth = trades_all[trades_all.apply(_rth_row, axis=1)].copy()
 
     # Metrics (RTH)
     metrics = compute_metrics(trades_rth, cfg, scope_label="RTH")
@@ -773,6 +905,9 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
 
     # Visuals & tables (RTH)
     save_visuals_and_tables(trades_rth, cfg, outdir)
+
+    # Segment tables & heatmap (RTH)
+    save_segment_tables_and_heatmap(trades_rth, cfg, outdir)
 
     # One-sheet
     generate_analytics_md(trades_all, trades_rth, metrics, cfg, outdir)
@@ -794,7 +929,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     if not symbols:
         # try to parse from Strategy text
         s = raw['Strategy'].astype(str) if 'Strategy' in raw.columns else pd.Series([], dtype=str)
-        pat = re.compile(r"/(?:[A-Z]{2,5})")
+        pat = re.compile(r"/([A-Z]{2,5})")  # FIX: capturing group for str.extract
         symbols = s.str.extract(pat, expand=False).dropna().unique().tolist()
     if not symbols:
         symbols = ['/MES']  # fallback default

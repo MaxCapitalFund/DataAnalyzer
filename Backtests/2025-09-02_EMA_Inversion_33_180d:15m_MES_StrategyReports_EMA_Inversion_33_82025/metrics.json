@@ -1,0 +1,52 @@
+{
+  "scope": "RTH",
+  "strategy_name": "EMA_Inversion_33",
+  "version": "1.2.0",
+  "timeframe": "180d:15m",
+  "initial_capital": 2500.0,
+  "point_value": 5.0,
+  "num_trades": 85,
+  "net_profit": -4840.9,
+  "gross_profit": -4497.5,
+  "total_return_pct": -193.636,
+  "total_return_pct_gross": -179.9,
+  "avg_monthly_return": 0.624340353300056,
+  "CAGR": NaN,
+  "profit_factor": 0.11359283388815039,
+  "profit_factor_gross": 0.13217559093101786,
+  "win_rate_pct": 18.823529411764707,
+  "avg_win_dollars": 38.77250000000001,
+  "avg_loss_dollars": -79.1486956521739,
+  "avg_win_dollars_gross": 42.8125,
+  "avg_loss_dollars_gross": -76.21323529411765,
+  "avg_win_points_per_contract": 7.7545,
+  "avg_loss_points_per_contract": -15.829739130434781,
+  "expectancy_per_trade_dollars": -56.95176470588235,
+  "expectancy_per_trade_dollars_gross": -52.911764705882355,
+  "max_drawdown_pct": 198.8363746907272,
+  "max_drawdown_dollars": 4709.359999999998,
+  "avg_drawdown_pct": -115.10907310831406,
+  "recovery_factor": -1.0279316085412884,
+  "per_trade_sharpe_proxy": -0.6722791442560543,
+  "per_trade_sortino_proxy": -0.7578707934660942,
+  "sharpe_annualized": -6.125612479394905,
+  "sortino_annualized": -6.905498749871442,
+  "largest_winning_trade": 192.21,
+  "largest_losing_trade": -366.54,
+  "vol_of_trade_returns": 0.03388578401842604,
+  "num_longs": 0,
+  "num_shorts": 0,
+  "avg_hold_minutes": NaN,
+  "avg_win_over_avg_loss": 0.48986909614264856,
+  "largest_win_over_largest_loss": 0.524390243902439,
+  "exit_reason_counts": {
+    "Close": 85
+  },
+  "exit_reason_avg_netpl": {
+    "Close": -56.95176470588236
+  },
+  "exit_reason_profit_factor": {
+    "Close": 0.11359283388815039
+  },
+  "instrument": "/MES"
+}

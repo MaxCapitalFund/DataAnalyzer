@@ -1,0 +1,52 @@
+{
+  "scope": "RTH",
+  "strategy_name": "SuperSignal_v7",
+  "version": "1.2.0",
+  "timeframe": "180d:15m",
+  "initial_capital": 2500.0,
+  "point_value": 5.0,
+  "num_trades": 306,
+  "net_profit": 4512.51,
+  "gross_profit": 5748.75,
+  "total_return_pct": 180.5004,
+  "total_return_pct_gross": 229.95000000000002,
+  "avg_monthly_return": 0.15482354965821538,
+  "CAGR": 3.2781658221852075,
+  "profit_factor": 1.3587484338330231,
+  "profit_factor_gross": 1.477818181818182,
+  "win_rate_pct": 55.22875816993464,
+  "avg_win_dollars": 101.13011834319529,
+  "avg_loss_dollars": -91.81372262773722,
+  "avg_win_dollars_gross": 103.9766081871345,
+  "avg_loss_dollars_gross": -89.12037037037037,
+  "avg_win_points_per_contract": 20.226023668639055,
+  "avg_loss_points_per_contract": -18.362744525547445,
+  "expectancy_per_trade_dollars": 14.746764705882354,
+  "expectancy_per_trade_dollars_gross": 18.78676470588235,
+  "max_drawdown_pct": 18.558743328594396,
+  "max_drawdown_dollars": 1223.7599999999975,
+  "avg_drawdown_pct": -6.670461113725885,
+  "recovery_factor": 3.68741419886253,
+  "per_trade_sharpe_proxy": 0.12681813384891572,
+  "per_trade_sortino_proxy": 0.25127781414662753,
+  "sharpe_annualized": 2.1882274402967474,
+  "sortino_annualized": 4.335760126454011,
+  "largest_winning_trade": 525.96,
+  "largest_losing_trade": -429.04,
+  "vol_of_trade_returns": 0.04651311057281714,
+  "num_longs": 0,
+  "num_shorts": 0,
+  "avg_hold_minutes": NaN,
+  "avg_win_over_avg_loss": 1.1014706238764744,
+  "largest_win_over_largest_loss": 1.225899683013239,
+  "exit_reason_counts": {
+    "Close": 306
+  },
+  "exit_reason_avg_netpl": {
+    "Close": 14.74676470588235
+  },
+  "exit_reason_profit_factor": {
+    "Close": 1.3587484338330231
+  },
+  "instrument": "/MES"
+}
