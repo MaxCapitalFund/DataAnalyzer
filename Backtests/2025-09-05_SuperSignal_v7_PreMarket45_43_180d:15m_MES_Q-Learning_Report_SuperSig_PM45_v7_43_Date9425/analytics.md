@@ -2,7 +2,7 @@
 # Strategy One-Sheet (Trade Data)
 
 **Strategy:** SuperSignal_v7_PreMarket45_43  
-**Instrument:** Unknown  
+**Instrument:** S&P500 Micro Mini Futures  
 **Timeframe:** 180d:15m  
 **Run Date:** 2025-09-05  
 **Session Basis:** New York time (ET). **Metrics Scope:** RTH (09:30–16:00)  
