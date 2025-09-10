@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# trading_report_analyzer_lean_v1.2.py
+# trading_report_analyzer_lean_v1.3.py
 # Purpose: Lean, investor-friendly analysis of ThinkorSwim Strategy Report CSVs
 # Scope: TRADE DATA ONLY (no EMA/VWAP/ATR). Focus on P/L, risk, trade analytics, visuals.
 # Session basis: **New York time (ET)**. Metrics computed for **RTH only (09:30–16:00 ET)**.
@@ -15,18 +15,21 @@
 #     - analytics.md (RTH-only KPIs + notes)
 #     - dow_kpis.csv, hold_kpis.csv, session_kpis.csv
 #     - heatmap_dow_hour_count.png
+#     - max_loss_streak_trades.csv, max_win_streak_trades.csv
+#     - top_worst_trades.csv
 #     - config.json
 #
 # ---- CHANGELOG ----
-# v1.2.0 (2025-09-01)
-# - Timeframe default set to 180d:15m.
-# - Metrics: added GROSS (pre-commission) alongside NET (post-commission) everywhere.
-# - Risk ratios: annualized Sharpe/Sortino (trade-level -> trades-per-year scaler).
-# - One-Sheet: Exit Method Breakdown and Long vs Short Breakdown sections added.
-# - Preserves signed Qty; uses QtyAbs for commissions/normalization; adds AmountExit & PositionAfterExit.
-# - Session buckets: PRE(03:00–09:29), OPEN(09:30–11:30), LUNCH(11:30–14:00), CLOSING(14:00–16:00).
-# - NEW: DOW KPIs, Hold-time KPIs, low-N flags, DOW×Hour heatmap, KPI ratios, MD references.
-# - FIX: Regex capture groups for symbol extraction; safer RTH filter fallback; monthly resample 'ME'.
+# v1.3.0 (2025-09-09)
+# - **Stop-loss normalization**: Any trade with NetPL < -100 is capped at -100 and the overage is added back as a positive correction.
+#   All metrics/plots now use AdjustedNetPL. New columns: AdjustedNetPL, SLCorrection, SLBreached.
+# - **Streaks**: Compute largest losing and winning streaks (using AdjustedNetPL). Export CSVs for both streaks.
+# - **Largest win/loss in points (per contract)** added to metrics/one-sheet.
+# - **Directional breakdown** extended with wins/losses counts, totals, averages, points, and simple return%.
+# - **Top losers**: Save top 10 worst trades (AdjustedNetPL) to CSV and reference in the one-sheet.
+# - **Exit method breakdown** now uses AdjustedNetPL; add optional split by StrategyBucket (Premarket45/RTH15/Other).
+# - **Heatmap** counts computed over AdjustedNetPL index (same result, cleaner when raw NetPL absent).
+# - **Timeframe label** remains dynamic (from CLI arg) and echoed in analytics.md.
 # -------------------
 
 import os
@@ -59,7 +62,7 @@ class BacktestConfig:
     commission_per_round_trip: float = 4.04
     # Default point value (used if instrument unknown)
     point_value: float = 5.0
-    version: str = "1.2.0"
+    version: str = "1.3.0"
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         day = datetime.now().strftime("%Y-%m-%d")
@@ -120,8 +123,9 @@ def max_drawdown_dollars(equity: pd.Series) -> float:
     return float((peak - equity).max())
 
 def _profit_factor(pl: pd.Series) -> float:
-    gp = pl[pl > 0].sum()
-    gl = -pl[pl < 0].sum()
+    s = pl.dropna()
+    gp = s[s > 0].sum()
+    gl = -s[s < 0].sum()
     if gl == 0:
         return float('inf') if gp > 0 else 0.0
     return float(gp / gl)
@@ -137,6 +141,7 @@ def _exit_reason(text: str) -> str:
 # ---- Segmentation helpers ----
 WEEKDAY_ORDER = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
 MIN_SAMPLE_PER_SEGMENT = 30  # doc: "Ensure ≥30 trades per segment"
+TOP_WORST_N = 10
 
 def _with_dow(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -164,6 +169,12 @@ def _kpi_table(series_pl: pd.Series) -> dict:
         "profit_factor": _profit_factor(s),
     }
 
+def _infer_strategy_bucket(text: str) -> str:
+    t = (text or "").upper()
+    if "RTH15" in t: return "RTH15"
+    if "PRE45" in t or "PRE" in t: return "Premarket45"
+    return "Other"
+
 # =========================
 # Load & Clean (TOS Strategy Report)
 # =========================
@@ -190,7 +201,6 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     if 'Date/Time' in df.columns:
         df['Date'] = _parse_datetime(df['Date/Time'])
     elif 'Date' in df.columns and 'Time' in df.columns:
-        # Combine if provided separately
         dt_str = df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip()
         df['Date'] = pd.to_datetime(dt_str, errors='coerce')
     elif 'Date' in df.columns:
@@ -240,9 +250,8 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     elif 'Instrument' in df.columns:
         df['Symbol'] = df['Instrument'].astype(str)
     else:
-        # Try to infer from Strategy text, e.g., contains "/MES"
         s = df['Strategy'].astype(str) if 'Strategy' in df.columns else pd.Series([], dtype=str)
-        pat = re.compile(r"/([A-Z]{2,5})")  # FIX: capturing group for str.extract
+        pat = re.compile(r"/([A-Z]{2,5})")
         df['Symbol'] = s.str.extract(pat, expand=False)
 
     # Preserve optional fields if present
@@ -305,10 +314,9 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                 commission = commission_rt * qty_abs
                 net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
 
-                # Derived normalizations
                 point_value = getattr(globals().get('cfg_global', object()), 'point_value', 5.0)
                 denom = point_value * qty_abs if (point_value and qty_abs) else np.nan
-                points_per_contract = float(trade_pl / denom) if (denom and pd.notna(trade_pl)) else np.nan
+                points_per_contract = float(net_pl / denom) if (denom and pd.notna(net_pl)) else np.nan  # placeholder; will recompute after SL fix
 
                 trades.append({
                     'Id': tid,
@@ -350,7 +358,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
             net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
             point_value = getattr(globals().get('cfg_global', object()), 'point_value', 5.0)
             denom = point_value * qty_abs if (point_value and qty_abs) else np.nan
-            points_per_contract = float(trade_pl / denom) if (denom and pd.notna(trade_pl)) else np.nan
+            points_per_contract = float(net_pl / denom) if (denom and pd.notna(net_pl)) else np.nan
             trades.append({
                 'Id': row.get('Id', np.nan),
                 'EntryTime': pd.NaT,
@@ -388,6 +396,60 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
 
 
 # =========================
+# Stop-loss correction & streaks
+# =========================
+
+def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.DataFrame:
+    """
+    If NetPL < -100, cap to -100 and add overage back as positive correction.
+    All per-trade metrics downstream should use AdjustedNetPL.
+    """
+    df = trades.copy()
+    df['SLBreached'] = df['NetPL'] < -100.0
+    # correction = -(NetPL) - 100 for breached rows; else 0
+    df['SLCorrection'] = np.where(df['SLBreached'], (-df['NetPL']) - 100.0, 0.0)
+    df['AdjustedNetPL'] = np.where(df['SLBreached'], -100.0, df['NetPL'])
+
+    # Recompute points per contract on AdjustedNetPL
+    qty_abs = pd.to_numeric(df['QtyAbs'], errors='coerce').replace(0, np.nan)
+    df['PointsPerContract'] = df['AdjustedNetPL'] / (point_value * qty_abs)
+
+    return df
+
+def _streak_lengths(sign_series: pd.Series) -> Tuple[int, int, Tuple[int,int], Tuple[int,int]]:
+    """
+    sign_series: boolean Series (True=win, False=loss)
+    Returns:
+      max_win_len, max_loss_len, (win_start_index, win_end_index), (loss_start_index, loss_end_index)
+    """
+    max_win = max_loss = 0
+    max_win_range = (None, None)
+    max_loss_range = (None, None)
+
+    curr = 0
+    curr_start = 0
+    curr_type = None  # 'win' or 'loss'
+
+    for i, is_win in enumerate(sign_series):
+        t = 'win' if is_win else 'loss'
+        if curr_type is None or t != curr_type:
+            curr_type = t
+            curr = 1
+            curr_start = i
+        else:
+            curr += 1
+
+        if t == 'win' and curr > max_win:
+            max_win = curr
+            max_win_range = (curr_start, i)
+        if t == 'loss' and curr > max_loss:
+            max_loss = curr
+            max_loss_range = (curr_start, i)
+
+    return max_win, max_loss, max_win_range, max_loss_range
+
+
+# =========================
 # Metrics (RTH only)
 # =========================
 
@@ -400,11 +462,15 @@ def _safe_days(first_dt, last_dt):
 def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: str = "RTH") -> dict:
     df = trades_rth.copy()
 
+    # Expect AdjustedNetPL added already
+    if 'AdjustedNetPL' not in df.columns:
+        raise RuntimeError("AdjustedNetPL missing; call apply_stoploss_corrections() before compute_metrics().")
+
     # --- Gross vs Net P/L series ---
-    pl_net = df['NetPL'].fillna(0.0)
+    pl_net = df['AdjustedNetPL'].fillna(0.0)
     pl_gross = df['GrossPL'].fillna(0.0) if 'GrossPL' in df.columns else pl_net.copy()
 
-    # Equity from NET P/L
+    # Equity from NET P/L (Adjusted)
     equity = cfg.initial_capital + pl_net.cumsum()
 
     # Totals & returns
@@ -413,25 +479,19 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
     total_return_pct = (total_net / cfg.initial_capital) * 100.0 if cfg.initial_capital else np.nan
     total_return_pct_gross = (total_gross / cfg.initial_capital) * 100.0 if cfg.initial_capital else np.nan
 
-    # Win/loss (Net)
+    # Win/loss (Adjusted)
     win_mask = pl_net > 0
     loss_mask = pl_net < 0
     avg_win = float(pl_net[win_mask].mean()) if win_mask.any() else np.nan
     avg_loss = float(pl_net[loss_mask].mean()) if loss_mask.any() else np.nan
 
-    # Win/loss (Gross)
-    win_mask_g = pl_gross > 0
-    loss_mask_g = pl_gross < 0
-    avg_win_gross = float(pl_gross[win_mask_g].mean()) if win_mask_g.any() else np.nan
-    avg_loss_gross = float(pl_gross[loss_mask_g].mean()) if loss_mask_g.any() else np.nan
-
-    # Points per trade (Net, per contract)
+    # Points per trade (Adjusted, per contract)
     qty_abs = pd.to_numeric(df['QtyAbs'], errors='coerce').replace(0, np.nan)
     pts_per_trade = pl_net / (cfg.point_value * qty_abs)
     avg_win_pts  = float(pts_per_trade[win_mask].mean()) if win_mask.any() else np.nan
     avg_loss_pts = float(pts_per_trade[loss_mask].mean()) if loss_mask.any() else np.nan
 
-    # Drawdowns (Net equity)
+    # Drawdowns (Adjusted net equity)
     max_dd_pct = abs(_max_drawdown(equity)) * 100.0
     dd_series = drawdown_series(equity)
     avg_dd_pct = float(dd_series.mean() * 100.0) if len(dd_series) else np.nan
@@ -461,12 +521,14 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
 
     largest_win = float(pl_net.max()) if len(pl_net) else np.nan
     largest_loss = float(pl_net.min()) if len(pl_net) else np.nan
+    largest_win_pts = float(pts_per_trade.max()) if len(pts_per_trade) else np.nan
+    largest_loss_pts = float(pts_per_trade.min()) if len(pts_per_trade) else np.nan
     vol_of_trade_returns = float(trade_rets.std(ddof=1)) if len(trade_rets) > 1 else np.nan
 
-    # Monthly & CAGR (Net equity)
+    # Monthly & CAGR (Adjusted net equity)
     dt = pd.to_datetime(df['ExitTime'], errors='coerce')
     eq_df = pd.DataFrame({'dt': dt, 'equity': equity})
-    eq_month = eq_df.dropna(subset=['dt']).set_index('dt').resample('ME').last()  # 'ME' month-end
+    eq_month = eq_df.dropna(subset=['dt']).set_index('dt').resample('ME').last()
     monthly_ret = eq_month['equity'].pct_change()
     avg_monthly_return = float(monthly_ret.mean()) if monthly_ret.notna().any() else np.nan
 
@@ -477,10 +539,7 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
         if ratio > 0:
             CAGR = float(np.power(ratio, 365.0 / days) - 1.0)
 
-    # Direction counts
-    num_longs  = int((df['Direction'] == 'Long').sum()) if 'Direction' in df.columns else 0
-    num_shorts = int((df['Direction'] == 'Short').sum()) if 'Direction' in df.columns else 0
-
+    # Direction counts & extended details
     metrics = {
         # identifiers
         "scope": scope_label,
@@ -493,7 +552,7 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
         # counts
         "num_trades": int(len(df)),
 
-        # profitability (Net & Gross)
+        # profitability (Adjusted Net & Gross)
         "net_profit": total_net,
         "gross_profit": total_gross,
         "total_return_pct": total_return_pct,
@@ -505,10 +564,10 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
         "win_rate_pct": float((pl_net > 0).mean() * 100.0),
         "avg_win_dollars": avg_win,
         "avg_loss_dollars": avg_loss,
-        "avg_win_dollars_gross": avg_win_gross,
-        "avg_loss_dollars_gross": avg_loss_gross,
         "avg_win_points_per_contract": avg_win_pts,
         "avg_loss_points_per_contract": avg_loss_pts,
+        "largest_winning_trade_points_per_contract": largest_win_pts,
+        "largest_losing_trade_points_per_contract": largest_loss_pts,
         "expectancy_per_trade_dollars": expectancy_dollars,
         "expectancy_per_trade_dollars_gross": expectancy_dollars_gross,
 
@@ -524,14 +583,9 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
         "largest_winning_trade": largest_win,
         "largest_losing_trade": largest_loss,
         "vol_of_trade_returns": vol_of_trade_returns,
-
-        # trade analytics
-        "num_longs": num_longs,
-        "num_shorts": num_shorts,
-        "avg_hold_minutes": float(df['HoldMins'].mean()) if 'HoldMins' in df.columns else np.nan,
     }
 
-    # Ratios requested by doc
+    # Ratios requested
     try:
         metrics["avg_win_over_avg_loss"] = (
             float(avg_win / abs(avg_loss)) if (isinstance(avg_loss, float) and avg_loss < 0) else np.nan
@@ -552,22 +606,63 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
             mask = (df['Direction'] == dir_label)
             if mask.any():
                 pl_dir = pl_net[mask]
-                metrics[f"{dir_label.lower()}_trades"] = int(mask.sum())
-                metrics[f"{dir_label.lower()}_win_rate_pct"] = float((pl_dir > 0).mean() * 100.0)
-                metrics[f"{dir_label.lower()}_avg_netpl"] = float(pl_dir.mean())
-                metrics[f"{dir_label.lower()}_profit_factor"] = _profit_factor(pl_dir)
+                pts_dir = pts_per_trade[mask]
+                wins = pl_dir[pl_dir > 0]
+                losses = pl_dir[pl_dir < 0]
+                metrics.update({
+                    f"{dir_label.lower()}_trades": int(mask.sum()),
+                    f"{dir_label.lower()}_win_rate_pct": float((pl_dir > 0).mean() * 100.0),
+                    f"{dir_label.lower()}_avg_netpl": float(pl_dir.mean()),
+                    f"{dir_label.lower()}_profit_factor": _profit_factor(pl_dir),
+                    f"{dir_label.lower()}_wins_count": int(wins.size),
+                    f"{dir_label.lower()}_losses_count": int(losses.size),
+                    f"{dir_label.lower()}_total_win_dollars": float(wins.sum()) if wins.size else 0.0,
+                    f"{dir_label.lower()}_total_loss_dollars": float(losses.sum()) if losses.size else 0.0,
+                    f"{dir_label.lower()}_avg_win_dollars": float(wins.mean()) if wins.size else np.nan,
+                    f"{dir_label.lower()}_avg_loss_dollars": float(losses.mean()) if losses.size else np.nan,
+                    f"{dir_label.lower()}_largest_win_points_per_contract": float(pts_dir.max()) if len(pts_dir) else np.nan,
+                    f"{dir_label.lower()}_largest_loss_points_per_contract": float(pts_dir.min()) if len(pts_dir) else np.nan,
+                    f"{dir_label.lower()}_return_pct": float(pl_dir.sum() / cfg.initial_capital * 100.0) if cfg.initial_capital else np.nan,
+                })
 
-    # Exit method breakdown (RTH)
+    # Exit method breakdown (Adjusted)
     if 'ExitReason' in df.columns:
         reason_counts = df['ExitReason'].value_counts(dropna=False).to_dict()
-        reason_avg = df.groupby('ExitReason')['NetPL'].mean().to_dict()
-        reason_pf = {r: _profit_factor(df.loc[df['ExitReason'] == r, 'NetPL'])
+        reason_avg_adj = df.groupby('ExitReason')['AdjustedNetPL'].mean().to_dict()
+        reason_pf = {r: _profit_factor(df.loc[df['ExitReason'] == r, 'AdjustedNetPL'])
                      for r in df['ExitReason'].dropna().unique()}
         metrics.update({
             "exit_reason_counts": reason_counts,
-            "exit_reason_avg_netpl": reason_avg,
+            "exit_reason_avg_netpl": reason_avg_adj,
             "exit_reason_profit_factor": reason_pf,
         })
+
+    # Optional: Exit method × StrategyBucket
+    if 'StrategyBucket' in df.columns and 'ExitReason' in df.columns:
+        xb = (df.groupby(['StrategyBucket', 'ExitReason'])['AdjustedNetPL']
+              .agg(['count','mean','sum']).reset_index())
+        metrics['exit_reason_by_strategy_bucket'] = {}
+        for _, row in xb.iterrows():
+            sb = row['StrategyBucket']; er = row['ExitReason']
+            d = metrics['exit_reason_by_strategy_bucket'].setdefault(sb, {})
+            d[er] = {"count": int(row['count']), "avg_adj_netpl": float(row['mean']), "sum_adj_netpl": float(row['sum'])}
+
+    # SL correction summary
+    if 'SLCorrection' in df.columns and 'SLBreached' in df.columns:
+        metrics['sl_total_corrections'] = float(df['SLCorrection'].sum())
+        metrics['sl_num_breaches'] = int(df['SLBreached'].sum())
+
+    # Streaks (Adjusted)
+    sign = pl_net > 0
+    max_win, max_loss, win_rng, loss_rng = _streak_lengths(sign)
+    metrics.update({
+        "max_win_streak": int(max_win),
+        "max_loss_streak": int(max_loss),
+        "max_win_streak_range": [int(win_rng[0]) if win_rng[0] is not None else -1,
+                                  int(win_rng[1]) if win_rng[1] is not None else -1],
+        "max_loss_streak_range": [int(loss_rng[0]) if loss_rng[0] is not None else -1,
+                                   int(loss_rng[1]) if loss_rng[1] is not None else -1],
+    })
 
     return metrics
 
@@ -578,7 +673,7 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
 
 def save_visuals_and_tables(trades_rth: pd.DataFrame, cfg: BacktestConfig, outdir: str) -> None:
     os.makedirs(outdir, exist_ok=True)
-    pl = trades_rth['NetPL'].fillna(0.0)
+    pl = trades_rth['AdjustedNetPL'].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
 
     # Equity (last 180 calendar days)
@@ -619,8 +714,8 @@ def save_visuals_and_tables(trades_rth: pd.DataFrame, cfg: BacktestConfig, outdi
 
     # Histogram of trade P/L
     plt.figure(figsize=(9, 4.5))
-    plt.hist(trades_rth['NetPL'].dropna().values, bins=30)
-    plt.xlabel("Net P/L per Trade ($)")
+    plt.hist(trades_rth['AdjustedNetPL'].dropna().values, bins=30)
+    plt.xlabel("Net P/L per Trade ($) — Adjusted")
     plt.ylabel("Count")
     plt.title("Trade P/L Distribution [RTH]")
     plt.tight_layout()
@@ -629,7 +724,7 @@ def save_visuals_and_tables(trades_rth: pd.DataFrame, cfg: BacktestConfig, outdi
 
     # Monthly performance table (RTH only)
     dt = pd.to_datetime(trades_rth['ExitTime'], errors='coerce')
-    monthly = pd.DataFrame({'NetPL': trades_rth['NetPL'].values}, index=dt)
+    monthly = pd.DataFrame({'NetPL': trades_rth['AdjustedNetPL'].values}, index=dt)
     monthly = monthly.dropna().resample('ME').sum()  # month-end
     monthly['ReturnPct'] = monthly['NetPL'] / cfg.initial_capital * 100.0
     monthly.to_csv(os.path.join(outdir, "monthly_performance.csv"))
@@ -652,7 +747,7 @@ def save_segment_tables_and_heatmap(trades_rth: pd.DataFrame, cfg: BacktestConfi
     # Day-of-week KPIs (stable DataFrame return)
     d_dow = _with_dow(df)
     if 'DOW' in d_dow.columns:
-        g = d_dow.groupby('DOW', observed=True)['NetPL']
+        g = d_dow.groupby('DOW', observed=True)['AdjustedNetPL']
         dow_tbl = pd.DataFrame({
             'count': g.size(),
             'sum': g.sum(min_count=1),
@@ -660,16 +755,14 @@ def save_segment_tables_and_heatmap(trades_rth: pd.DataFrame, cfg: BacktestConfi
             'win_rate_pct': g.apply(lambda s: (s > 0).mean() * 100.0 if len(s) else np.nan),
             'profit_factor': g.apply(_profit_factor),
         })
-        # keep weekday order rows even if missing
         dow_tbl = dow_tbl.reindex(WEEKDAY_ORDER)
-        # flag low N
         dow_tbl['low_sample_flag'] = dow_tbl['count'].fillna(0) < MIN_SAMPLE_PER_SEGMENT
         dow_tbl.to_csv(os.path.join(outdir, "dow_kpis.csv"))
 
-# Hold-time buckets KPIs
+    # Hold-time buckets KPIs
     d_hold = _with_hold_buckets(df)
     if 'HoldBucket' in d_hold.columns:
-        g = d_hold.groupby('HoldBucket', observed=True)['NetPL']
+        g = d_hold.groupby('HoldBucket', observed=True)['AdjustedNetPL']
         hold_tbl = pd.DataFrame({
             'count': g.size(),
             'sum': g.sum(min_count=1),
@@ -677,14 +770,13 @@ def save_segment_tables_and_heatmap(trades_rth: pd.DataFrame, cfg: BacktestConfi
             'win_rate_pct': g.apply(lambda s: (s > 0).mean() * 100.0 if len(s) else np.nan),
             'profit_factor': g.apply(_profit_factor),
         })
-        # ensure buckets show up even if empty
         hold_tbl = hold_tbl.reindex(d_hold['HoldBucket'].cat.categories)
         hold_tbl['low_sample_flag'] = hold_tbl['count'].fillna(0) < MIN_SAMPLE_PER_SEGMENT
         hold_tbl.to_csv(os.path.join(outdir, "hold_kpis.csv"))
 
-        # Session KPIs
+    # Session KPIs
     if 'Session' in df.columns:
-        g = df.groupby('Session')['NetPL']
+        g = df.groupby('Session')['AdjustedNetPL']
         sess_tbl = pd.DataFrame({
             'count': g.size(),
             'sum': g.sum(min_count=1),
@@ -700,7 +792,8 @@ def save_segment_tables_and_heatmap(trades_rth: pd.DataFrame, cfg: BacktestConfi
     df['ExitHour'] = dt.dt.hour
     d_heat = _with_dow(df.dropna(subset=['ExitHour']))
     if not d_heat.empty:
-        pivot_counts = d_heat.pivot_table(index='DOW', columns='ExitHour', values='NetPL', aggfunc='size', fill_value=0)
+        pivot_counts = d_heat.pivot_table(index='DOW', columns='ExitHour',
+                                          values='AdjustedNetPL', aggfunc='size', fill_value=0)
         pivot_counts = pivot_counts.reindex(WEEKDAY_ORDER)
         plt.figure(figsize=(10, 4.5))
         plt.imshow(pivot_counts.values, aspect='auto', interpolation='nearest')
@@ -760,15 +853,17 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 **Commission (RT / contract):** ${_fmt(cfg.commission_per_round_trip, 2)}  
 **Point Value:** ${_fmt(g('point_value'), 2)} per point per contract
 
+> **Note:** Stop-loss normalization is enabled: losses below **−$100** are capped at −$100 and the overage is added back as a positive correction (TOS discrepancy fix). All metrics use **AdjustedNetPL**.
+
 ---
 
 ## Key Performance Indicators (KPI's)
-- **Net Profit (after commissions):** ${_fmt(g('net_profit'))}
+- **Net Profit (after commissions, adjusted):** ${_fmt(g('net_profit'))}
 - **Gross Profit (before commissions):** ${_fmt(g('gross_profit'))}
-- **Total Return (Net):** {_fmt(g('total_return_pct'), pct=True)}
+- **Total Return (Net, adjusted):** {_fmt(g('total_return_pct'), pct=True)}
 - **Total Return (Gross):** {_fmt(g('total_return_pct_gross'), pct=True)}
 - **Win Rate:** {_fmt(g('win_rate_pct'), pct=True)}
-- **Profit Factor (Net):** {_fmt(g('profit_factor'))}
+- **Profit Factor (Adjusted):** {_fmt(g('profit_factor'))}
 - **Max Drawdown:** ${_fmt(g('max_drawdown_dollars'))} ({_fmt(g('max_drawdown_pct'), pct=True)})
 - **CAGR:** {_fmt(g('CAGR')*100, pct=True)}
 - **Sharpe (annualized):** {_fmt(g('sharpe_annualized'))}
@@ -779,25 +874,23 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 ## Performance (returns & consistency)
 | Metric | Result | Definition / Formula |
 |---|---:|---|
-| Net Profit ($, Net) | ${_fmt(g('net_profit'))} | Σ(NetPLᵢ) |
+| Net Profit ($, Adjusted) | ${_fmt(g('net_profit'))} | Σ(AdjustedNetPLᵢ) |
 | Gross Profit ($) | ${_fmt(g('gross_profit'))} | Σ(GrossPLᵢ) |
 | Total Return (%) | {_fmt(g('total_return_pct'), pct=True)} | (Net Profit ÷ Initial Capital) × 100 |
 | Total Return (Gross %) | {_fmt(g('total_return_pct_gross'), pct=True)} | (Gross Profit ÷ Initial Capital) × 100 |
 | Average Monthly Return | {_fmt(g('avg_monthly_return')*100, pct=True)} | mean(Monthly equity % change) |
 | CAGR | {_fmt(g('CAGR')*100, pct=True)} | (Ending Equity ÷ Initial Capital)^(365 ÷ Days) − 1 |
-| Profit Factor (Net) | {_fmt(g('profit_factor'))} | (Σ profits) ÷ |Σ losses| |
-| Profit Factor (Gross) | {_fmt(g('profit_factor_gross'))} | (Σ profits) ÷ |Σ losses| |
+| Profit Factor (Adjusted) | {_fmt(g('profit_factor'))} | (Σ profits) ÷ |Σ losses| |
 | Win Rate (%) | {_fmt(g('win_rate_pct'), pct=True)} | (# wins ÷ total trades) × 100 |
-| Avg Win ($, Net) | ${_fmt(g('avg_win_dollars'))} | mean(NetPL | NetPL>0) |
-| Avg Loss ($, Net) | ${_fmt(g('avg_loss_dollars'))} | mean(NetPL | NetPL<0) |
-| Avg Win ($, Gross) | ${_fmt(g('avg_win_dollars_gross'))} | mean(GrossPL | GrossPL>0) |
-| Avg Loss ($, Gross) | ${_fmt(g('avg_loss_dollars_gross'))} | mean(GrossPL | GrossPL<0) |
-| **Avg Win ÷ Avg Loss** | {_fmt(g('avg_win_over_avg_loss'))} | |Avg Win| ÷ |Avg Loss| (Net) |
-| **Largest Win ÷ Largest Loss** | {_fmt(g('largest_win_over_largest_loss'))} | |Largest Win| ÷ |Largest Loss| (Net) |
-| Avg Win (pts / contract) | {_fmt(g('avg_win_points_per_contract'))} | NetPL ÷ (point_value × |Qty|) |
-| Avg Loss (pts / contract) | {_fmt(g('avg_loss_points_per_contract'))} | NetPL ÷ (point_value × |Qty|) |
-| Expectancy per Trade ($, Net) | ${_fmt(g('expectancy_per_trade_dollars'))} | mean(NetPLᵢ) |
-| Expectancy per Trade ($, Gross) | ${_fmt(g('expectancy_per_trade_dollars_gross'))} | mean(GrossPLᵢ) |
+| Avg Win ($, Adjusted) | ${_fmt(g('avg_win_dollars'))} | mean(AdjustedNetPL | >0) |
+| Avg Loss ($, Adjusted) | ${_fmt(g('avg_loss_dollars'))} | mean(AdjustedNetPL | <0) |
+| **Avg Win ÷ Avg Loss** | {_fmt(g('avg_win_over_avg_loss'))} | |Avg Win| ÷ |Avg Loss| |
+| **Largest Win ÷ Largest Loss** | {_fmt(g('largest_win_over_largest_loss'))} | |Largest Win| ÷ |Largest Loss| |
+| Avg Win (pts / contract) | {_fmt(g('avg_win_points_per_contract'))} | AdjustedNetPL ÷ (point_value × |Qty|) |
+| Avg Loss (pts / contract) | {_fmt(g('avg_loss_points_per_contract'))} | AdjustedNetPL ÷ (point_value × |Qty|) |
+| Largest Win (pts/contract) | {_fmt(g('largest_winning_trade_points_per_contract'))} | max over trades |
+| Largest Loss (pts/contract) | {_fmt(g('largest_losing_trade_points_per_contract'))} | min over trades |
+| Expectancy per Trade ($, Adjusted) | ${_fmt(g('expectancy_per_trade_dollars'))} | mean(AdjustedNetPLᵢ) |
 
 ---
 
@@ -810,12 +903,12 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 | Recovery Factor | {_fmt(g('recovery_factor'))} | Net Profit ÷ Max DD ($) |
 | Sharpe (per-trade proxy) | {_fmt(g('per_trade_sharpe_proxy'))} | mean(rᵢ) ÷ stdev(rᵢ) |
 | Sortino (per-trade proxy) | {_fmt(g('per_trade_sortino_proxy'))} | mean(rᵢ) ÷ stdev(min(rᵢ,0)) |
-| Largest Winning Trade ($) | ${_fmt(g('largest_winning_trade'))} | max(NetPLᵢ) |
-| Largest Losing Trade ($) | ${_fmt(g('largest_losing_trade'))} | min(NetPLᵢ) |
+| Largest Winning Trade ($) | ${_fmt(g('largest_winning_trade'))} | max(AdjustedNetPLᵢ) |
+| Largest Losing Trade ($) | ${_fmt(g('largest_losing_trade'))} | min(AdjustedNetPLᵢ) |
 | Volatility of Trade Returns | {_fmt(g('vol_of_trade_returns'))} | stdev(per-trade returns) |
 
 ## Exit Method Breakdown (RTH)
-| Exit | Trades | Avg NetPL ($) | Profit Factor |
+| Exit | Trades | Avg NetPL ($, Adj.) | Profit Factor (Adj.) |
 |---|---:|---:|---:|
 """
     if 'exit_reason_counts' in m:
@@ -823,6 +916,13 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
             avg = m.get('exit_reason_avg_netpl', {}).get(r, np.nan)
             pf  = m.get('exit_reason_profit_factor', {}).get(r, np.nan)
             md += f"| {r} | {int(n)} | {_fmt(avg)} | {_fmt(pf)} |\n"
+
+    # Strategy bucket split (if present)
+    if 'exit_reason_by_strategy_bucket' in m:
+        md += "\n### Exit Method × Strategy Bucket\n| Bucket | Exit | Trades | Avg Adj. NetPL | Sum Adj. NetPL |\n|---|---|---:|---:|---:|\n"
+        for bucket, d in m['exit_reason_by_strategy_bucket'].items():
+            for exit_, vals in d.items():
+                md += f"| {bucket} | {exit_} | {vals['count']} | {_fmt(vals['avg_adj_netpl'])} | {_fmt(vals['sum_adj_netpl'])} |\n"
 
     md += f"""
 ---
@@ -832,6 +932,18 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 |---|---:|---:|---:|---:|
 | Long | {int(g('long_trades', 0))} | {_fmt(g('long_win_rate_pct'), pct=True)} | {_fmt(g('long_avg_netpl'))} | {_fmt(g('long_profit_factor'))} |
 | Short | {int(g('short_trades', 0))} | {_fmt(g('short_win_rate_pct'), pct=True)} | {_fmt(g('short_avg_netpl'))} | {_fmt(g('short_profit_factor'))} |
+
+### Extra (by direction)
+**Longs:** wins={int(g('long_wins_count',0))}, losses={int(g('long_losses_count',0))}, total win=${_fmt(g('long_total_win_dollars',0))}, total loss=${_fmt(g('long_total_loss_dollars',0))}, avg win=${_fmt(g('long_avg_win_dollars'))}, avg loss=${_fmt(g('long_avg_loss_dollars'))}, largest win (pts/contract)={_fmt(g('long_largest_win_points_per_contract'))}, largest loss (pts/contract)={_fmt(g('long_largest_loss_points_per_contract'))}, return={_fmt(g('long_return_pct'), pct=True)}
+
+**Shorts:** wins={int(g('short_wins_count',0))}, losses={int(g('short_losses_count',0))}, total win=${_fmt(g('short_total_win_dollars',0))}, total loss=${_fmt(g('short_total_loss_dollars',0))}, avg win=${_fmt(g('short_avg_win_dollars'))}, avg loss=${_fmt(g('short_avg_loss_dollars'))}, largest win (pts/contract)={_fmt(g('short_largest_win_points_per_contract'))}, largest loss (pts/contract)={_fmt(g('short_largest_loss_points_per_contract'))}, return={_fmt(g('short_return_pct'), pct=True)}
+
+---
+
+## Streaks (Adjusted)
+- **Max Winning Streak:** {int(g('max_win_streak',0))} trades (index range {g('max_win_streak_range',[None,None])})
+- **Max Losing Streak:** {int(g('max_loss_streak',0))} trades (index range {g('max_loss_streak_range',[None,None])})
+- See files: `max_win_streak_trades.csv`, `max_loss_streak_trades.csv`.
 
 ---
 
@@ -844,6 +956,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Hold-Time KPIs:** `hold_kpis.csv` (flags rows with low sample size < {MIN_SAMPLE_PER_SEGMENT})
 - **Session KPIs:** `session_kpis.csv` (flags rows with low sample size < {MIN_SAMPLE_PER_SEGMENT})
 - **Trade Distribution Heatmap (Count):** `heatmap_dow_hour_count.png`
+- **Top Worst Trades:** `top_worst_trades.csv` (N={TOP_WORST_N})
 
 ### Monthly Performance Preview (last 6)
 {monthly_preview}
@@ -879,8 +992,16 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
 
     # Build trades (all trades first)
     trades_all = build_trades(df_raw, cfg.commission_per_round_trip)
+
+    # Strategy bucket from strategy name
+    bucket = _infer_strategy_bucket(strategy_label)
+    trades_all['StrategyBucket'] = bucket
+
     # Session tags
     trades_all['Session'] = trades_all['EntryTime'].apply(_tag_session)
+
+    # Apply stop-loss normalization & recompute points
+    trades_all = apply_stoploss_corrections(trades_all, cfg.point_value)
 
     # Save enriched trades (all)
     trades_out = os.path.join(outdir, "trades_enriched.csv")
@@ -900,6 +1021,7 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     metrics["strategy_name"] = strategy_label
     metrics["instrument"] = instr
 
+    # Save metrics
     with open(os.path.join(outdir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
 
@@ -908,6 +1030,25 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
 
     # Segment tables & heatmap (RTH)
     save_segment_tables_and_heatmap(trades_rth, cfg, outdir)
+
+    # Streak CSVs (Adjusted, RTH order)
+    pl = trades_rth['AdjustedNetPL'].fillna(0.0).reset_index(drop=True)
+    sign = pl > 0
+    max_win, max_loss, win_rng, loss_rng = _streak_lengths(sign)
+
+    def _slice_to_csv(rng, fname):
+        if rng[0] is None or rng[1] is None or rng[0] < 0 or rng[1] < 0:
+            pd.DataFrame([]).to_csv(os.path.join(outdir, fname), index=False)
+            return
+        sub = trades_rth.iloc[rng[0]:rng[1]+1].copy()
+        sub.to_csv(os.path.join(outdir, fname), index=False)
+
+    _slice_to_csv(win_rng, "max_win_streak_trades.csv")
+    _slice_to_csv(loss_rng, "max_loss_streak_trades.csv")
+
+    # Top worst trades (Adjusted)
+    worst = trades_rth.sort_values('AdjustedNetPL').head(TOP_WORST_N)
+    worst.to_csv(os.path.join(outdir, "top_worst_trades.csv"), index=False)
 
     # One-sheet
     generate_analytics_md(trades_all, trades_rth, metrics, cfg, outdir)
@@ -927,9 +1068,8 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     # Detect instruments present
     symbols = raw['Symbol'].dropna().unique().tolist() if 'Symbol' in raw.columns else []
     if not symbols:
-        # try to parse from Strategy text
         s = raw['Strategy'].astype(str) if 'Strategy' in raw.columns else pd.Series([], dtype=str)
-        pat = re.compile(r"/([A-Z]{2,5})")  # FIX: capturing group for str.extract
+        pat = re.compile(r"/([A-Z]{2,5})")
         symbols = s.str.extract(pat, expand=False).dropna().unique().tolist()
     if not symbols:
         symbols = ['/MES']  # fallback default
@@ -954,7 +1094,7 @@ if __name__ == "__main__":
         required=True,
         help="Path(s) or globs for TOS Strategy Report CSV(s). Examples: file.csv  StrategyReports/*.csv  'StrategyReports/*.csv'"
     )
-    parser.add_argument("--timeframe", type=str, default="180d:15m", help="Timeframe label for outputs.")
+    parser.add_argument("--timeframe", type=str, default="180d:15m", help="Timeframe label for outputs (display only).")
     parser.add_argument("--capital", type=float, default=2500.0, help="Initial capital (1-contract float).")
     parser.add_argument("--commission", type=float, default=4.04, help="Commission per contract round trip.")
     parser.add_argument("--point_value", type=float, default=5.0, help="Default dollars per point per contract (used if instrument unknown).")
@@ -984,7 +1124,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.2.0",
+        version="1.3.0",
     )
 
     all_metrics = []

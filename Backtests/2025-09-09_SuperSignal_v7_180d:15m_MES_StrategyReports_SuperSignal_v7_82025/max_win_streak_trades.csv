@@ -1,0 +1,7 @@
+Id,EntryTime,ExitTime,EntryPrice,ExitPrice,EntryQty,ExitQty,QtyAbs,TradePL,GrossPL,Commission,NetPL,PointsPerContract,GrossAmount,NetAmount,AmountExit,PositionAfterExit,BaseStrategy,StrategyRaw,Symbol,EntrySide,ExitSide,ExitReason,Direction,HoldMins,StrategyBucket,Session,SLBreached,SLCorrection,AdjustedNetPL
+60,,2024-12-23 10:15:00,,,,1.0,1.0,87.5,87.5,4.04,83.46,16.692,87.5,83.46,5.0,0.0,SuperSignal_v7,SuperSignal_v7(BTC Target),,Buy to Close,Buy to Close,Close,Unknown,,Other,Unknown,False,0.0,83.46
+62,,2024-12-23 14:30:00,,,,-1.0,1.0,93.75,93.75,4.04,89.71,17.942,93.75,89.71,-5.0,0.0,SuperSignal_v7,SuperSignal_v7(STC Target),,Sell to Close,Sell to Close,Close,Unknown,,Other,Unknown,False,0.0,89.71
+64,,2024-12-23 15:45:00,,,,-1.0,1.0,60.0,60.0,4.04,55.96,11.192,60.0,55.96,-5.0,0.0,SuperSignal_v7,SuperSignal_v7(STC Target),,Sell to Close,Sell to Close,Close,Unknown,,Other,Unknown,False,0.0,55.96
+66,,2024-12-24 10:30:00,,,,-1.0,1.0,47.5,47.5,4.04,43.46,8.692,47.5,43.46,-5.0,0.0,SuperSignal_v7,SuperSignal_v7(STC Target),,Sell to Close,Sell to Close,Close,Unknown,,Other,Unknown,False,0.0,43.46
+68,,2024-12-26 12:30:00,,,,-1.0,1.0,78.75,78.75,4.04,74.71,14.941999999999998,78.75,74.71,-5.0,0.0,SuperSignal_v7,SuperSignal_v7(STC Target),,Sell to Close,Sell to Close,Close,Unknown,,Other,Unknown,False,0.0,74.71
+72,,2024-12-27 12:30:00,,,,1.0,1.0,108.75,108.75,4.04,104.71,20.942,108.75,104.71,5.0,0.0,SuperSignal_v7,SuperSignal_v7(BTC Target),,Buy to Close,Buy to Close,Close,Unknown,,Other,Unknown,False,0.0,104.71
