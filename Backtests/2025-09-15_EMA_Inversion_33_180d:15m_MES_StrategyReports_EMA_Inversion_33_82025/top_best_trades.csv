@@ -1,0 +1,11 @@
+Id,EntryTime,ExitTime,EntryPrice,ExitPrice,EntryQty,ExitQty,QtyAbs,TradePL,GrossPL,Commission,NetPL,PointsPerContract,GrossAmount,NetAmount,AmountExit,PositionAfterExit,BaseStrategy,StrategyRaw,Symbol,EntrySide,ExitSide,ExitReason,Direction,HoldMins,StrategyBucket,Session,SLBreached,SLCorrection,AdjustedNetPL
+1092,,2025-07-16 09:30:00,,,,1.0,1.0,196.25,196.25,4.04,192.21,38.442,196.25,192.21,5.0,0.0,EMA_Inversion_33,EMA_Inversion_33(STC 1(0.00)),,Buy to Close,Buy to Close,Close,Unknown,,Other,Unknown,False,0.0,192.21
+332,,2025-03-04 09:30:00,,,,1.0,1.0,65.0,65.0,4.04,60.96,12.192,65.0,60.96,5.0,0.0,EMA_Inversion_33,EMA_Inversion_33(BTO 1),,Buy to Close,Buy to Close,Close,Unknown,,Other,Unknown,False,0.0,60.96
+292,,2025-02-24 09:30:00,,,,1.0,1.0,57.5,57.5,4.04,53.46,10.692,57.5,53.46,5.0,0.0,EMA_Inversion_33,EMA_Inversion_33(BTO 1),,Buy to Close,Buy to Close,Close,Unknown,,Other,Unknown,False,0.0,53.46
+182,,2025-01-24 09:30:00,,,,-1.0,1.0,53.75,53.75,4.04,49.71,9.942,53.75,49.71,-5.0,0.0,EMA_Inversion_33,EMA_Inversion_33(STO -1),,Sell to Close,Sell to Close,Close,Unknown,,Other,Unknown,False,0.0,49.71
+504,,2025-03-31 09:30:00,,,,1.0,1.0,43.75,43.75,4.04,39.71,7.942,43.75,39.71,5.0,0.0,EMA_Inversion_33,EMA_Inversion_33(BTO 1),,Buy to Close,Buy to Close,Close,Unknown,,Other,Unknown,False,0.0,39.71
+1122,,2025-07-25 09:30:00,,,,-1.0,1.0,41.25,41.25,4.04,37.21,7.442,41.25,37.21,-5.0,0.0,EMA_Inversion_33,EMA_Inversion_33(STC -1(0.00)),,Sell to Close,Sell to Close,Close,Unknown,,Other,Unknown,False,0.0,37.21
+742,,2025-04-23 09:30:00,,,,-1.0,1.0,40.0,40.0,4.04,35.96,7.192,40.0,35.96,-5.0,0.0,EMA_Inversion_33,EMA_Inversion_33(STO -1),,Sell to Close,Sell to Close,Close,Unknown,,Other,Unknown,False,0.0,35.96
+488,,2025-03-28 09:30:00,,,,1.0,1.0,28.75,28.75,4.04,24.71,4.942,28.75,24.71,5.0,0.0,EMA_Inversion_33,EMA_Inversion_33(BTO 1),,Buy to Close,Buy to Close,Close,Unknown,,Other,Unknown,False,0.0,24.71
+786,,2025-05-01 09:30:00,,,,-1.0,1.0,27.5,27.5,4.04,23.46,4.692,27.5,23.46,-5.0,0.0,EMA_Inversion_33,EMA_Inversion_33(STC -1(0.00)),,Sell to Close,Sell to Close,Close,Unknown,,Other,Unknown,False,0.0,23.46
+1172,,2025-08-11 09:30:00,,,,1.0,1.0,27.5,27.5,4.04,23.46,4.692,27.5,23.46,5.0,0.0,EMA_Inversion_33,EMA_Inversion_33(BTO 1),,Buy to Close,Buy to Close,Close,Unknown,,Other,Unknown,False,0.0,23.46

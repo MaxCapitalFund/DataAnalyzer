@@ -1,0 +1,70 @@
+{
+  "scope": "RTH",
+  "strategy_name": "SuperSignal_v7_PreMarket45_43",
+  "version": "1.3.1",
+  "timeframe": "180d:15m",
+  "initial_capital": 2500.0,
+  "point_value": 5.0,
+  "num_trades": 112,
+  "net_profit": 3771.8,
+  "gross_profit": 1607.5,
+  "total_return_pct": 150.872,
+  "total_return_pct_gross": 64.3,
+  "avg_monthly_return": 0.18701078172524616,
+  "CAGR": 2.7695089871377596,
+  "profit_factor": 1.7620182837517038,
+  "profit_factor_gross": 1.2191173964900324,
+  "win_rate_pct": 49.107142857142854,
+  "avg_win_dollars": 158.5736363636363,
+  "avg_loss_dollars": -86.83771929824562,
+  "avg_win_points_per_contract": 31.714727272727277,
+  "avg_loss_points_per_contract": -17.367543859649125,
+  "largest_winning_trade_points_per_contract": 248.942,
+  "largest_losing_trade_points_per_contract": -20.0,
+  "expectancy_per_trade_dollars": 33.676785714285714,
+  "expectancy_per_trade_dollars_gross": 14.352678571428571,
+  "max_drawdown_pct": 35.72919470811535,
+  "max_drawdown_dollars": 1048.08,
+  "avg_drawdown_pct": -8.180180360621767,
+  "recovery_factor": 3.598771086176628,
+  "per_trade_sharpe_proxy": 0.19294657065702314,
+  "per_trade_sortino_proxy": 0.7341302287746848,
+  "sharpe_annualized": 2.0379150902547765,
+  "sortino_annualized": 7.753934502891692,
+  "largest_winning_trade": 1244.71,
+  "largest_losing_trade": -100.0,
+  "vol_of_trade_returns": 0.06981577459419828,
+  "avg_win_over_avg_loss": 1.8260916758881294,
+  "largest_win_over_largest_loss": 12.4471,
+  "exit_reason_counts": {
+    "Close": 112
+  },
+  "exit_reason_avg_netpl": {
+    "Close": 33.676785714285714
+  },
+  "exit_reason_profit_factor": {
+    "Close": 1.7620182837517038
+  },
+  "exit_reason_by_strategy_bucket": {
+    "Premarket45": {
+      "Close": {
+        "count": 112,
+        "avg_adj_netpl": 33.676785714285714,
+        "sum_adj_netpl": 3771.7999999999997
+      }
+    }
+  },
+  "sl_total_corrections": 2616.7799999999997,
+  "sl_num_breaches": 32,
+  "max_win_streak": 5,
+  "max_loss_streak": 11,
+  "max_win_streak_range": [
+    48,
+    52
+  ],
+  "max_loss_streak_range": [
+    62,
+    72
+  ],
+  "instrument": "/MES"
+}

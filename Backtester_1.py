@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# trading_report_analyzer_lean_v1.3.py
+# trading_report_analyzer_lean_v1.3.1.py
 # Purpose: Lean, investor-friendly analysis of ThinkorSwim Strategy Report CSVs
 # Scope: TRADE DATA ONLY (no EMA/VWAP/ATR). Focus on P/L, risk, trade analytics, visuals.
 # Session basis: **New York time (ET)**. Metrics computed for **RTH only (09:30–16:00 ET)**.
@@ -16,10 +16,13 @@
 #     - dow_kpis.csv, hold_kpis.csv, session_kpis.csv
 #     - heatmap_dow_hour_count.png
 #     - max_loss_streak_trades.csv, max_win_streak_trades.csv
-#     - top_worst_trades.csv
+#     - top_worst_trades.csv, top_best_trades.csv
 #     - config.json
 #
 # ---- CHANGELOG ----
+# v1.3.1 (2025-09-09)
+# - Added top_best_trades.csv (top 10 winners by AdjustedNetPL) and reference in analytics.md.
+#
 # v1.3.0 (2025-09-09)
 # - **Stop-loss normalization**: Any trade with NetPL < -100 is capped at -100 and the overage is added back as a positive correction.
 #   All metrics/plots now use AdjustedNetPL. New columns: AdjustedNetPL, SLCorrection, SLBreached.
@@ -27,8 +30,8 @@
 # - **Largest win/loss in points (per contract)** added to metrics/one-sheet.
 # - **Directional breakdown** extended with wins/losses counts, totals, averages, points, and simple return%.
 # - **Top losers**: Save top 10 worst trades (AdjustedNetPL) to CSV and reference in the one-sheet.
-# - **Exit method breakdown** now uses AdjustedNetPL; add optional split by StrategyBucket (Premarket45/RTH15/Other).
-# - **Heatmap** counts computed over AdjustedNetPL index (same result, cleaner when raw NetPL absent).
+# - **Exit method × StrategyBucket (Premarket45/RTH15/Other)** support based on strategy name.
+# - **Heatmap** counts computed over AdjustedNetPL index.
 # - **Timeframe label** remains dynamic (from CLI arg) and echoed in analytics.md.
 # -------------------
 
@@ -62,7 +65,7 @@ class BacktestConfig:
     commission_per_round_trip: float = 4.04
     # Default point value (used if instrument unknown)
     point_value: float = 5.0
-    version: str = "1.3.0"
+    version: str = "1.3.1"
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         day = datetime.now().strftime("%Y-%m-%d")
@@ -316,7 +319,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
 
                 point_value = getattr(globals().get('cfg_global', object()), 'point_value', 5.0)
                 denom = point_value * qty_abs if (point_value and qty_abs) else np.nan
-                points_per_contract = float(net_pl / denom) if (denom and pd.notna(net_pl)) else np.nan  # placeholder; will recompute after SL fix
+                points_per_contract = float(net_pl / denom) if (denom and pd.notna(net_pl)) else np.nan  # will recompute after SL fix
 
                 trades.append({
                     'Id': tid,
@@ -406,7 +409,6 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
     """
     df = trades.copy()
     df['SLBreached'] = df['NetPL'] < -100.0
-    # correction = -(NetPL) - 100 for breached rows; else 0
     df['SLCorrection'] = np.where(df['SLBreached'], (-df['NetPL']) - 100.0, 0.0)
     df['AdjustedNetPL'] = np.where(df['SLBreached'], -100.0, df['NetPL'])
 
@@ -462,7 +464,6 @@ def _safe_days(first_dt, last_dt):
 def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: str = "RTH") -> dict:
     df = trades_rth.copy()
 
-    # Expect AdjustedNetPL added already
     if 'AdjustedNetPL' not in df.columns:
         raise RuntimeError("AdjustedNetPL missing; call apply_stoploss_corrections() before compute_metrics().")
 
@@ -539,20 +540,14 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
         if ratio > 0:
             CAGR = float(np.power(ratio, 365.0 / days) - 1.0)
 
-    # Direction counts & extended details
     metrics = {
-        # identifiers
         "scope": scope_label,
         "strategy_name": cfg.strategy_name,
         "version": cfg.version,
         "timeframe": cfg.timeframe,
         "initial_capital": cfg.initial_capital,
         "point_value": cfg.point_value,
-
-        # counts
         "num_trades": int(len(df)),
-
-        # profitability (Adjusted Net & Gross)
         "net_profit": total_net,
         "gross_profit": total_gross,
         "total_return_pct": total_return_pct,
@@ -570,8 +565,6 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
         "largest_losing_trade_points_per_contract": largest_loss_pts,
         "expectancy_per_trade_dollars": expectancy_dollars,
         "expectancy_per_trade_dollars_gross": expectancy_dollars_gross,
-
-        # risk
         "max_drawdown_pct": max_dd_pct,
         "max_drawdown_dollars": max_dd_dollars,
         "avg_drawdown_pct": avg_dd_pct,
@@ -585,18 +578,13 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
         "vol_of_trade_returns": vol_of_trade_returns,
     }
 
-    # Ratios requested
     try:
-        metrics["avg_win_over_avg_loss"] = (
-            float(avg_win / abs(avg_loss)) if (isinstance(avg_loss, float) and avg_loss < 0) else np.nan
-        )
+        metrics["avg_win_over_avg_loss"] = float(avg_win / abs(avg_loss)) if (isinstance(avg_loss, float) and avg_loss < 0) else np.nan
     except Exception:
         metrics["avg_win_over_avg_loss"] = np.nan
 
     try:
-        metrics["largest_win_over_largest_loss"] = (
-            float(largest_win / abs(largest_loss)) if (isinstance(largest_loss, float) and largest_loss < 0) else np.nan
-        )
+        metrics["largest_win_over_largest_loss"] = float(largest_win / abs(largest_loss)) if (isinstance(largest_loss, float) and largest_loss < 0) else np.nan
     except Exception:
         metrics["largest_win_over_largest_loss"] = np.nan
 
@@ -744,7 +732,7 @@ def save_segment_tables_and_heatmap(trades_rth: pd.DataFrame, cfg: BacktestConfi
     if df.empty:
         return
     
-    # Day-of-week KPIs (stable DataFrame return)
+    # Day-of-week KPIs
     d_dow = _with_dow(df)
     if 'DOW' in d_dow.columns:
         g = d_dow.groupby('DOW', observed=True)['AdjustedNetPL']
@@ -957,6 +945,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Session KPIs:** `session_kpis.csv` (flags rows with low sample size < {MIN_SAMPLE_PER_SEGMENT})
 - **Trade Distribution Heatmap (Count):** `heatmap_dow_hour_count.png`
 - **Top Worst Trades:** `top_worst_trades.csv` (N={TOP_WORST_N})
+- **Top Best Trades:** `top_best_trades.csv` (N={TOP_WORST_N})
 
 ### Monthly Performance Preview (last 6)
 {monthly_preview}
@@ -1046,9 +1035,12 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     _slice_to_csv(win_rng, "max_win_streak_trades.csv")
     _slice_to_csv(loss_rng, "max_loss_streak_trades.csv")
 
-    # Top worst trades (Adjusted)
+    # Top worst & top best trades (Adjusted)
     worst = trades_rth.sort_values('AdjustedNetPL').head(TOP_WORST_N)
     worst.to_csv(os.path.join(outdir, "top_worst_trades.csv"), index=False)
+
+    best = trades_rth.sort_values('AdjustedNetPL', ascending=False).head(TOP_WORST_N)
+    best.to_csv(os.path.join(outdir, "top_best_trades.csv"), index=False)
 
     # One-sheet
     generate_analytics_md(trades_all, trades_rth, metrics, cfg, outdir)
@@ -1124,7 +1116,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.3.0",
+        version="1.3.1",
     )
 
     all_metrics = []
