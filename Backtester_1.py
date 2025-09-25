@@ -55,7 +55,7 @@ import matplotlib.pyplot as plt
 @dataclass
 class BacktestConfig:
     strategy_name: str = ""  # filled from CSV Strategy base name
-    instruments: Tuple[str, ...] = ("/MES",)
+    instruments: Tuple[str, ...] = ("MES",)
     timeframe: str = "180d:15m"
     # RTH session in **New York time** (ET)
     session_hours_rth: Tuple[str, str] = ("09:30", "16:00")
