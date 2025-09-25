@@ -1,7 +1,7 @@
 {
   "strategy_name": "SuperSignal_v7_RTH15_v43",
   "instruments": [
-    "/MES"
+    "MES"
   ],
   "timeframe": "180d:15m",
   "session_hours_rth": [
