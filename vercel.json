@@ -1,7 +1,7 @@
 {
   "functions": {
-    "pages/api/analyze.js": {
-      "runtime": "nodejs18.x"
+    "pages/api/analyze-python.js": {
+      "runtime": "@vercel/node@3.0.7"
     }
   }
 }
