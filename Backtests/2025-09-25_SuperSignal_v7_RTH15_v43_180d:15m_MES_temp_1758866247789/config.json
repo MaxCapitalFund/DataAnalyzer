@@ -1,0 +1,15 @@
+{
+  "strategy_name": "SuperSignal_v7_RTH15_v43",
+  "instruments": [
+    "/MES"
+  ],
+  "timeframe": "180d:15m",
+  "session_hours_rth": [
+    "09:30",
+    "16:00"
+  ],
+  "initial_capital": 2500.0,
+  "commission_per_round_trip": 4.04,
+  "point_value": 5.0,
+  "version": "1.3.1"
+}
