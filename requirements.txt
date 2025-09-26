@@ -3,3 +3,4 @@ numpy>=1.21.0
 matplotlib>=3.4.0
 fastapi>=0.68.0
 python-multipart>=0.0.5
+uvicorn>=0.15.0

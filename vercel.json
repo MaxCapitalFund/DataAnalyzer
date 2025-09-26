@@ -1,9 +1,23 @@
 {
   "functions": {
-    "api/analyze.py": {
+    "api/index.py": {
       "runtime": "@vercel/python@3.9"
     }
   },
+  "routes": [
+    {
+      "src": "/",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/api/analyze",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/static/(.*)",
+      "dest": "/static/$1"
+    }
+  ],
   "env": {
     "CI": "false"
   }
