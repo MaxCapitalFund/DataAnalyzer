@@ -27,9 +27,9 @@ def handler(req, res):
 
         try:
             # Run the Python backtester
-            script_path = Path(__file__).parent.parent.parent / 'Backtester_1.py'
+            script_path = Path('/var/task') / 'Backtester_1.py'
             cmd = [
-                sys.executable,  # Use current Python interpreter
+                sys.executable,
                 str(script_path),
                 '--csv', csv_file,
                 '--timeframe', timeframe,
@@ -110,7 +110,7 @@ def handler(req, res):
             results['strategy_name'] = results['metrics'].get('strategy_name', 'Unknown')
             
             # Return results directly for Next.js
-            return results
+            res.status(200).json(results)
             
         finally:
             # Clean up temporary file
@@ -119,7 +119,7 @@ def handler(req, res):
                 
     except Exception as e:
         # Return error directly for Next.js
-        return {
+        res.status(500).json({
             'error': str(e),
             'type': type(e).__name__
-        }
+        })
