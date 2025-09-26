@@ -1,8 +1,14 @@
 {
   "functions": {
-    "pages/api/analyze-python.js": {
-      "runtime": "@vercel/node@3.0.7"
+    "api/analyze.py": {
+      "runtime": "@vercel/python@3.9.15"
     }
-  }
+  },
+  "builds": [
+    {
+      "src": "api/analyze.py",
+      "use": "@vercel/python@3.9.15"
+    }
+  ]
 }
 

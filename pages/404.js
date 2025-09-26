@@ -1,5 +1,3 @@
-import Link from 'next/link'
-
 export default function Custom404() {
   return (
     <div style={{ 
@@ -7,13 +5,11 @@ export default function Custom404() {
       flexDirection: 'column', 
       alignItems: 'center', 
       justifyContent: 'center', 
-      minHeight: '100vh',
-      padding: '20px',
-      textAlign: 'center'
+      height: '100vh',
+      fontFamily: 'Arial, sans-serif'
     }}>
       <h1>404 - Page Not Found</h1>
       <p>The page you're looking for doesn't exist.</p>
-      <Link href="/">Go back home</Link>
     </div>
   )
 }

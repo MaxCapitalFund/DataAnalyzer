@@ -32,7 +32,7 @@ export default function Home() {
       // Read the CSV file
       const csvText = await file.text();
       
-              const response = await fetch('/api/analyze-python', {
+              const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
