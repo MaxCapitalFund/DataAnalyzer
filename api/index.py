@@ -65,17 +65,22 @@ async def analyze_csv(
         with open(csv_file, 'w') as f:
             f.write(csv_text)
         
-        # Determine script path based on environment
+        # Determine script path and working directory based on environment
         if os.environ.get('VERCEL'):
             script_path = Path('/var/task') / 'Backtester_1.py'
-            run_cwd = Path('/var/task')
+            # Use /tmp for writable directory in Vercel
+            run_cwd = Path('/tmp')
+            # Create a temporary Backtests directory in /tmp
+            backtests_root = run_cwd / 'Backtests'
+            backtests_root.mkdir(parents=True, exist_ok=True)
+            # Set matplotlib cache directory to /tmp for Vercel
+            os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib'
         else:
             script_path = Path(__file__).parent.parent / 'Backtester_1.py'
             run_cwd = Path(__file__).parent.parent
-        
-        # Ensure Backtests directory exists
-        backtests_root = run_cwd / 'Backtests'
-        backtests_root.mkdir(parents=True, exist_ok=True)
+            # Ensure Backtests directory exists
+            backtests_root = run_cwd / 'Backtests'
+            backtests_root.mkdir(parents=True, exist_ok=True)
         
         # Run the Python backtester
         cmd = [
