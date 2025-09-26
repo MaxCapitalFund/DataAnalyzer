@@ -1,0 +1,7 @@
+,count,sum,mean,win_rate_pct,profit_factor,low_sample_flag
+<=5m,,,,,,True
+5–15m,,,,,,True
+15–30m,,,,,,True
+30–60m,,,,,,True
+60–120m,,,,,,True
+>120m,,,,,,True
