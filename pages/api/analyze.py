@@ -7,16 +7,14 @@ from pathlib import Path
 import pandas as pd
 import base64
 
-def handler(request):
-    if request.method != 'POST':
-        return {
-            'statusCode': 405,
-            'body': json.dumps({'error': 'Method not allowed'})
-        }
+def handler(req, res):
+    if req.method != 'POST':
+        res.status(405).json({'error': 'Method not allowed'})
+        return
 
     try:
         # Parse request body
-        body = json.loads(request.body)
+        body = json.loads(req.body)
         timeframe = body.get('timeframe', '180d:15m')
         capital = body.get('capital', 2500.0)
         commission = body.get('commission', 4.04)
@@ -111,13 +109,8 @@ def handler(request):
             
             results['strategy_name'] = results['metrics'].get('strategy_name', 'Unknown')
             
-            return {
-                'statusCode': 200,
-                'headers': {
-                    'Content-Type': 'application/json'
-                },
-                'body': json.dumps(results)
-            }
+            # Return results directly for Next.js
+            return results
             
         finally:
             # Clean up temporary file
@@ -125,13 +118,8 @@ def handler(request):
                 os.unlink(csv_file)
                 
     except Exception as e:
+        # Return error directly for Next.js
         return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json'
-            },
-            'body': json.dumps({
-                'error': str(e),
-                'type': type(e).__name__
-            })
+            'error': str(e),
+            'type': type(e).__name__
         }
