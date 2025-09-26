@@ -1,8 +1,11 @@
 {
   "functions": {
     "api/analyze.py": {
-      "runtime": "@vercel/python@3.9.15"
+      "runtime": "@vercel/python@3.9"
     }
+  },
+  "env": {
+    "CI": "false"
   }
 }
 
