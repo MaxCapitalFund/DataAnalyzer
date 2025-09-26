@@ -3,12 +3,6 @@
     "api/analyze.py": {
       "runtime": "@vercel/python@3.9.15"
     }
-  },
-  "builds": [
-    {
-      "src": "api/analyze.py",
-      "use": "@vercel/python@3.9.15"
-    }
-  ]
+  }
 }
 
