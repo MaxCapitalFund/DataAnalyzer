@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/index.py": {
-      "runtime": "@vercel/python@3.9"
+      "runtime": "python3.9"
     }
   },
   "routes": [
@@ -17,9 +17,6 @@
       "src": "/static/(.*)",
       "dest": "/static/$1"
     }
-  ],
-  "env": {
-    "CI": "false"
-  }
+  ]
 }
 
