@@ -1,9 +1,7 @@
 services:
   - type: web
     name: trading-analyzer
-    env: node
-    buildCommand: npm install && npm run build && pip install -r requirements.txt
-    startCommand: npm start
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: NODE_ENV
         value: production
