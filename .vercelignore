@@ -1,0 +1,31 @@
+# Ignore large data directories
+Backtests/
+StrategyReports/
+
+# Ignore development files
+test_*.py
+*.log
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore deployment configs for other platforms
+Dockerfile
+render.yaml
+railway.json
+nixpacks.toml
+build.sh
+
+# Ignore git
+.git/
+.gitignore
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore OS files
+.DS_Store
+Thumbs.db

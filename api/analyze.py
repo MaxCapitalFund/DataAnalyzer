@@ -6,6 +6,18 @@ import subprocess
 from pathlib import Path
 import pandas as pd
 import base64
+import math
+
+def clean_nan_values(obj):
+    """Recursively clean NaN values from dictionaries and lists"""
+    if isinstance(obj, dict):
+        return {key: clean_nan_values(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nan_values(item) for item in obj]
+    elif isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    else:
+        return obj
 
 def handler(request):
     if request.method != 'POST':
@@ -28,13 +40,13 @@ def handler(request):
         with open(csv_file, 'w') as f:
             f.write(csv_data)
 
-        # Define the path to Backtester_1.py
+        # Define the path to Backtester_vercel.py
         # Use /var/task for Vercel, current directory for local
         if os.environ.get('VERCEL'):
-            script_path = Path('/var/task') / 'Backtester_1.py'
+            script_path = Path('/var/task') / 'Backtester_vercel.py'
             run_cwd = Path('/var/task')
         else:
-            script_path = Path(__file__).parent.parent / 'Backtester_1.py'
+            script_path = Path(__file__).parent.parent / 'Backtester_vercel.py'
             run_cwd = Path(__file__).parent.parent
         
         # Ensure Backtests directory exists for output
@@ -72,7 +84,9 @@ def handler(request):
         metrics_file = latest_dir / 'metrics.json'
         if metrics_file.exists():
             with open(metrics_file) as f:
-                results['metrics'] = json.load(f)
+                metrics_data = json.load(f)
+                # Clean NaN values from metrics
+                results['metrics'] = clean_nan_values(metrics_data)
         
         # Read analytics
         analytics_file = latest_dir / 'analytics.md'
@@ -85,6 +99,8 @@ def handler(request):
             if not file_path.exists():
                 return []
             df = pd.read_csv(file_path)
+            # Clean NaN values from DataFrame
+            df = df.fillna('')
             return df.to_dict('records')
         
         results['data'] = {
@@ -124,6 +140,9 @@ def handler(request):
             results['trades_rth_count'] = 0
         
         results['strategy_name'] = results['metrics'].get('strategy_name', 'Unknown')
+        
+        # Final cleanup of any remaining NaN values
+        results = clean_nan_values(results)
         
         # Return results
         return {

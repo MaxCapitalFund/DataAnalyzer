@@ -2,7 +2,7 @@
   "version": 2,
   "builds": [
     {
-      "src": "api/index.py",
+      "src": "api/analyze.py",
       "use": "@vercel/python",
       "config": {
         "pythonVersion": "3.11"
@@ -19,12 +19,17 @@
       "dest": "/static/index.html"
     },
     {
-      "src": "/api/(.*)",
-      "dest": "/api/index.py"
+      "src": "/api/analyze",
+      "dest": "/api/analyze.py"
     },
     {
       "src": "/(.*)",
       "dest": "/static/$1"
     }
-  ]
+  ],
+  "functions": {
+    "api/analyze.py": {
+      "maxDuration": 30
+    }
+  }
 }
