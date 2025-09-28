@@ -1,6 +1,6 @@
-pandas==1.5.3
-numpy==1.24.3
-matplotlib==3.6.3
-fastapi==0.104.1
-python-multipart==0.0.6
-uvicorn==0.24.0
+pandas
+numpy
+matplotlib
+fastapi
+python-multipart
+uvicorn
