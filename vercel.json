@@ -1,18 +1,10 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/analyze.py",
-      "use": "@vercel/python",
-      "config": {
-        "pythonVersion": "3.11"
-      }
-    },
-    {
-      "src": "static/**",
-      "use": "@vercel/static"
+  "functions": {
+    "api/analyze.py": {
+      "maxDuration": 30
     }
-  ],
+  },
   "routes": [
     {
       "src": "/",
@@ -26,10 +18,5 @@
       "src": "/(.*)",
       "dest": "/static/$1"
     }
-  ],
-  "functions": {
-    "api/analyze.py": {
-      "maxDuration": 30
-    }
-  }
+  ]
 }
