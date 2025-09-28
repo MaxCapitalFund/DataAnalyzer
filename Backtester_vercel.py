@@ -36,9 +36,10 @@ class BacktestConfig:
         # Use /tmp for Vercel serverless environment
         temp_dir = Path('/tmp')
         day = datetime.now().strftime("%Y-%m-%d")
+        timestamp = datetime.now().strftime("%H%M%S_%f")[:-3]  # Include milliseconds for uniqueness
         safe_strategy = strategy_label.replace(" ", "_")
         safe_instr = (instrument or "UNK").replace("/", "")
-        return str(temp_dir / f"Backtests_{day}_{safe_strategy}_{self.timeframe}_{safe_instr}_{csv_stem}")
+        return str(temp_dir / f"Backtests_{day}_{safe_strategy}_{self.timeframe}_{safe_instr}_{csv_stem}_{timestamp}")
 
 # =========================
 # Helpers

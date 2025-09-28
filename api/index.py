@@ -68,11 +68,8 @@ async def analyze_csv(
         # Determine script path and working directory based on environment
         if os.environ.get('VERCEL'):
             script_path = Path('/var/task') / 'Backtester_vercel.py'
-            # Use /tmp for writable directory in Vercel
-            run_cwd = Path('/tmp')
-            # Create a temporary Backtests directory in /tmp
-            backtests_root = run_cwd / 'Backtests'
-            backtests_root.mkdir(parents=True, exist_ok=True)
+            # Use /var/task as working directory for Vercel
+            run_cwd = Path('/var/task')
             # Set matplotlib cache directory to /tmp for Vercel
             os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib'
         else:
@@ -107,11 +104,22 @@ async def analyze_csv(
                 raise Exception(f"Analysis failed: {result.stderr}")
         
         # Find the most recent output directory
-        output_base_dir = run_cwd / 'Backtests'
-        if not output_base_dir.exists():
-            raise Exception(f'Backtests directory not found at {output_base_dir}')
+        if os.environ.get('VERCEL'):
+            # In Vercel, look in /tmp for the output
+            output_base_dir = Path('/tmp')
+            # Find directories that start with "Backtests_"
+            backtest_dirs = [d for d in output_base_dir.iterdir() if d.is_dir() and d.name.startswith('Backtests_')]
+        else:
+            # Local development - look in Backtests directory
+            output_base_dir = run_cwd / 'Backtests'
+            if not output_base_dir.exists():
+                raise Exception(f'Backtests directory not found at {output_base_dir}')
+            backtest_dirs = [d for d in output_base_dir.iterdir() if d.is_dir()]
         
-        latest_dir = max(output_base_dir.iterdir(), key=lambda p: p.stat().st_mtime)
+        if not backtest_dirs:
+            raise Exception('No backtest output directories found')
+        
+        latest_dir = max(backtest_dirs, key=lambda p: p.stat().st_mtime)
         
         # Read results
         results = {}
