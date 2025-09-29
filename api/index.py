@@ -44,6 +44,20 @@ async def read_root():
     with open("static/index.html", "r") as f:
         return HTMLResponse(content=f.read())
 
+@app.options("/api/analyze")
+async def options_analyze():
+    """Handle CORS preflight requests"""
+    return JSONResponse(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Max-Age": "86400"
+        },
+        content=""
+    )
+
 @app.post("/api/analyze")
 async def analyze_csv(
     file: UploadFile = File(...),

@@ -20,9 +20,25 @@ def clean_nan_values(obj):
         return obj
 
 def handler(request):
+    # Handle CORS preflight requests
+    if request.method == 'OPTIONS':
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Max-Age': '86400'
+            },
+            'body': ''
+        }
+    
     if request.method != 'POST':
         return {
             'statusCode': 405,
+            'headers': {
+                'Access-Control-Allow-Origin': '*'
+            },
             'body': json.dumps({'error': 'Method not allowed'})
         }
 
