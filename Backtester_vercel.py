@@ -564,3 +564,55 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 
     with open(os.path.join(outdir, "analytics.md"), "w", encoding="utf-8") as f:
         f.write(md)
+
+if __name__ == "__main__":
+    import argparse, glob, sys
+
+    parser = argparse.ArgumentParser(description="Lean analysis of TOS Strategy Report CSV (trade data only). RTH metrics + session tags.")
+    parser.add_argument(
+        "--csv",
+        nargs="+",
+        required=True,
+        help="Path(s) or globs for TOS Strategy Report CSV(s). Examples: file.csv  StrategyReports/*.csv  'StrategyReports/*.csv'"
+    )
+    parser.add_argument("--timeframe", type=str, default="180d:15m", help="Timeframe label for outputs (display only).")
+    parser.add_argument("--capital", type=float, default=2500.0, help="Initial capital (1-contract float).")
+    parser.add_argument("--commission", type=float, default=4.04, help="Commission per contract round trip.")
+    parser.add_argument("--point_value", type=float, default=5.0, help="Default dollars per point per contract (used if instrument unknown).")
+
+    args = parser.parse_args()
+
+    # Resolve CSVs
+    resolved = []
+    for item in args.csv:
+        matches = glob.glob(item)
+        if matches:
+            resolved.extend(matches)
+        else:
+            resolved.append(item)
+
+    csv_paths = sorted({str(Path(p)) for p in resolved if Path(p).exists()})
+    if not csv_paths:
+        print(f"[ERROR] No CSV files matched any of: {args.csv}", file=sys.stderr)
+        sys.exit(1)
+
+    # global config (read by build_trades)
+    global cfg_global
+    cfg_global = BacktestConfig(
+        strategy_name="",  # will be set from CSV
+        instruments=("/MES",),
+        timeframe=args.timeframe,
+        initial_capital=args.capital,
+        commission_per_round_trip=args.commission,
+        point_value=args.point_value,
+        version="1.3.1",
+    )
+
+    all_metrics = []
+    for csv_path in csv_paths:
+        print(f"\n[RUN] CSV: {csv_path}")
+        results = run_backtest(csv_path, cfg_global)
+        for r in results:
+            m = r["metrics"]
+            m["csv"] = str(Path(csv_path).name)
+            all_metrics.append(m)
