@@ -12,7 +12,7 @@
     },
     {
       "src": "/api/analyze",
-      "dest": "/api/analyze.py"
+      "dest": "/api/test.py"
     },
     {
       "src": "/(.*)",
