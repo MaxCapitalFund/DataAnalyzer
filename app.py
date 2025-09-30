@@ -89,40 +89,44 @@ async def analyze_csv(
             "--commission", str(commission)
         ]
         
-        print(f"Running command: {' '.join(cmd)}")
-        print(f"Working directory: {run_cwd}")
-        print(f"Script exists: {script_path.exists()}")
+        debug_info = {
+            "command": ' '.join(cmd),
+            "working_directory": str(run_cwd),
+            "script_exists": script_path.exists(),
+            "script_path": str(script_path)
+        }
         
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=run_cwd)
         
-        print(f"Return code: {result.returncode}")
-        print(f"Stdout: {result.stdout}")
-        print(f"Stderr: {result.stderr}")
+        debug_info.update({
+            "return_code": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr
+        })
         
         if result.returncode != 0:
-            print(f"Python script stdout: {result.stdout}")
-            print(f"Python script stderr: {result.stderr}")
-            
             # Check for specific common errors and provide helpful messages
             if "KeyError: 'EntryTime'" in result.stderr:
-                raise Exception("CSV file format error: Missing required columns. Please ensure your CSV has 'Date/Time' column and proper trade data structure.")
+                raise Exception(f"CSV file format error: Missing required columns. Debug: {debug_info}")
             elif "Could not find 'Date/Time'" in result.stderr:
-                raise Exception("CSV file format error: Missing 'Date/Time' column. Please check your CSV file format.")
+                raise Exception(f"CSV file format error: Missing 'Date/Time' column. Debug: {debug_info}")
             else:
-                raise Exception(f"Analysis failed: {result.stderr}")
+                raise Exception(f"Analysis failed: {result.stderr}. Debug: {debug_info}")
         
         # Find the most recent output directory
         if os.environ.get('VERCEL'):
             # In Vercel, look in /tmp for the output
             output_base_dir = Path('/tmp')
-            print(f"Looking for output directories in: {output_base_dir}")
-            print(f"Directory exists: {output_base_dir.exists()}")
+            debug_info["output_search"] = {
+                "search_path": str(output_base_dir),
+                "directory_exists": output_base_dir.exists()
+            }
             if output_base_dir.exists():
                 all_dirs = list(output_base_dir.iterdir())
-                print(f"All directories in /tmp: {[d.name for d in all_dirs if d.is_dir()]}")
+                debug_info["output_search"]["all_directories"] = [d.name for d in all_dirs if d.is_dir()]
                 # Find directories that start with "Backtests_"
                 backtest_dirs = [d for d in all_dirs if d.is_dir() and d.name.startswith('Backtests_')]
-                print(f"Backtest directories found: {[d.name for d in backtest_dirs]}")
+                debug_info["output_search"]["backtest_directories"] = [d.name for d in backtest_dirs]
             else:
                 backtest_dirs = []
         else:
@@ -133,7 +137,7 @@ async def analyze_csv(
             backtest_dirs = [d for d in output_base_dir.iterdir() if d.is_dir()]
         
         if not backtest_dirs:
-            raise Exception(f'No backtest output directories found in {output_base_dir}')
+            raise Exception(f'No backtest output directories found. Debug info: {debug_info}')
         
         latest_dir = max(backtest_dirs, key=lambda p: p.stat().st_mtime)
         
