@@ -20,8 +20,11 @@ def clean_nan_values(obj):
         return obj
 
 def handler(request):
+    print(f"Handler called with method: {request.method}")
+    
     # Handle CORS preflight requests
     if request.method == 'OPTIONS':
+        print("Handling OPTIONS request")
         return {
             'statusCode': 200,
             'headers': {
@@ -34,6 +37,7 @@ def handler(request):
         }
     
     if request.method != 'POST':
+        print(f"Method not allowed: {request.method}")
         return {
             'statusCode': 405,
             'headers': {
@@ -42,9 +46,12 @@ def handler(request):
             'body': json.dumps({'error': 'Method not allowed'})
         }
 
+    print("Starting POST request processing")
     try:
         # Parse request body
+        print(f"Request body length: {len(request.body) if request.body else 0}")
         body = json.loads(request.body)
+        print(f"Parsed body keys: {list(body.keys())}")
         timeframe = body.get('timeframe', '180d:15m')
         capital = body.get('capital', 2500.0)
         commission = body.get('commission', 4.04)
