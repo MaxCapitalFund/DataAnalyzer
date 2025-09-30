@@ -80,12 +80,18 @@ def handler(request):
             "--commission", str(commission)
         ]
         
+        print(f"Running command: {' '.join(cmd)}")
+        print(f"Working directory: {run_cwd}")
+        print(f"Script exists: {script_path.exists()}")
+        
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=run_cwd)
         
+        print(f"Return code: {result.returncode}")
+        print(f"Stdout: {result.stdout}")
+        print(f"Stderr: {result.stderr}")
+        
         if result.returncode != 0:
-            print(f"Python script stdout: {result.stdout}")
-            print(f"Python script stderr: {result.stderr}")
-            raise Exception(f"Python script failed: {result.stderr}")
+            raise Exception(f"Python script failed with return code {result.returncode}. Stdout: {result.stdout}. Stderr: {result.stderr}")
 
         # Find the most recent output directory
         if os.environ.get('VERCEL'):
