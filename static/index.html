@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Trading Strategy Analyzer</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
@@ -691,7 +694,12 @@
                 formData.append('capital', '2500');
                 formData.append('commission', '4.04');
 
-                const response = await fetch('/api/analyze', {
+                // Debug: Log the URL being called
+                const apiUrl = '/api/analyze';
+                console.log('🔍 Calling API URL:', apiUrl);
+                console.log('🔍 Current location:', window.location.href);
+                
+                const response = await fetch(apiUrl, {
                     method: 'POST',
                     body: formData
                 });
