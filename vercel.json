@@ -1,10 +1,11 @@
 {
   "version": 2,
-  "functions": {
-    "api/analyze.py": {
-      "maxDuration": 30
+  "builds": [
+    {
+      "src": "api/test.py",
+      "use": "@vercel/python"
     }
-  },
+  ],
   "routes": [
     {
       "src": "/",
