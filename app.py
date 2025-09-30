@@ -89,7 +89,15 @@ async def analyze_csv(
             "--commission", str(commission)
         ]
         
+        print(f"Running command: {' '.join(cmd)}")
+        print(f"Working directory: {run_cwd}")
+        print(f"Script exists: {script_path.exists()}")
+        
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=run_cwd)
+        
+        print(f"Return code: {result.returncode}")
+        print(f"Stdout: {result.stdout}")
+        print(f"Stderr: {result.stderr}")
         
         if result.returncode != 0:
             print(f"Python script stdout: {result.stdout}")
@@ -107,8 +115,16 @@ async def analyze_csv(
         if os.environ.get('VERCEL'):
             # In Vercel, look in /tmp for the output
             output_base_dir = Path('/tmp')
-            # Find directories that start with "Backtests_"
-            backtest_dirs = [d for d in output_base_dir.iterdir() if d.is_dir() and d.name.startswith('Backtests_')]
+            print(f"Looking for output directories in: {output_base_dir}")
+            print(f"Directory exists: {output_base_dir.exists()}")
+            if output_base_dir.exists():
+                all_dirs = list(output_base_dir.iterdir())
+                print(f"All directories in /tmp: {[d.name for d in all_dirs if d.is_dir()]}")
+                # Find directories that start with "Backtests_"
+                backtest_dirs = [d for d in all_dirs if d.is_dir() and d.name.startswith('Backtests_')]
+                print(f"Backtest directories found: {[d.name for d in backtest_dirs]}")
+            else:
+                backtest_dirs = []
         else:
             # Local development - look in Backtests directory
             output_base_dir = run_cwd / 'Backtests'
@@ -117,7 +133,7 @@ async def analyze_csv(
             backtest_dirs = [d for d in output_base_dir.iterdir() if d.is_dir()]
         
         if not backtest_dirs:
-            raise Exception('No backtest output directories found')
+            raise Exception(f'No backtest output directories found in {output_base_dir}')
         
         latest_dir = max(backtest_dirs, key=lambda p: p.stat().st_mtime)
         
