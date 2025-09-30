@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 @dataclass
 class BacktestConfig:
     strategy_name: str = ""
-    instruments: Tuple[str, ...] = ("MES",)
+    instruments: Tuple[str, ...] = ("/MES",)
     timeframe: str = "180d:15m"
     session_hours_rth: Tuple[str, str] = ("09:30", "16:00")
     initial_capital: float = 2500.0
@@ -33,11 +33,11 @@ class BacktestConfig:
     version: str = "1.3.1"
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
-        # Use /tmp for Vercel serverless environment
+        # Use /tmp for Vercel/serverless environments
         temp_dir = Path('/tmp')
         day = datetime.now().strftime("%Y-%m-%d")
         timestamp = datetime.now().strftime("%H%M%S_%f")[:-3]  # Include milliseconds for uniqueness
-        safe_strategy = strategy_label.replace(" ", "_")
+        safe_strategy = (strategy_label or "Unknown").replace(" ", "_")
         safe_instr = (instrument or "UNK").replace("/", "")
         return str(temp_dir / f"Backtests_{day}_{safe_strategy}_{self.timeframe}_{safe_instr}_{csv_stem}_{timestamp}")
 
@@ -52,9 +52,13 @@ def _to_float(series: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors='coerce')
 
 def _parse_datetime(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, format="%m/%d/%y %I:%M %p", errors='coerce')
+    # Try TOS default first, then fall back to generic parser
+    parsed = pd.to_datetime(series, format="%m/%d/%y %I:%M %p", errors='coerce')
+    if parsed.isna().all():
+        parsed = pd.to_datetime(series, errors='coerce')
+    return parsed
 
-# Session tags per spec
+# Session tags per spec (ET)
 PRE_START,  PRE_END  = time(3, 0),  time(9, 29)
 OPEN_START, OPEN_END = time(9, 30), time(11, 30)
 LUNCH_START,LUNCH_END= time(11, 30),time(14, 0)
@@ -64,10 +68,10 @@ def _tag_session(dt: pd.Timestamp) -> str:
     if pd.isna(dt):
         return "Unknown"
     t = dt.time()
-    if PRE_START <= t <= PRE_END:     return "PRE"
-    if OPEN_START <= t <= OPEN_END:   return "OPEN"
-    if LUNCH_START <= t <= LUNCH_END: return "LUNCH"
-    if CLOSE_START <= t <= CLOSE_END: return "CLOSING"
+    if PRE_START   <= t <= PRE_END:    return "PRE"
+    if OPEN_START  <= t <= OPEN_END:   return "OPEN"
+    if LUNCH_START <= t <= LUNCH_END:  return "LUNCH"
+    if CLOSE_START <= t <= CLOSE_END:  return "CLOSING"
     return "OTHER"
 
 def _in_rth(dt: pd.Timestamp) -> bool:
@@ -91,11 +95,31 @@ def _profit_factor(pl: pd.Series) -> float:
 
 def _exit_reason(text: str) -> str:
     s = str(text).upper()
-    if any(w in s for w in ["TARGET", "TGT", "TP", "PROFIT"]): return "Target"
-    if any(w in s for w in ["STOP", "SL", "STOPPED"]):          return "Stop"
-    if any(w in s for w in ["TIME", "TIME EXIT", "TIMED", "TIMEOUT"]): return "Time"
+    if any(w in s for w in ["TARGET", "TGT", "TP", "PROFIT"]):            return "Target"
+    if any(w in s for w in ["STOP", "SL", "STOPPED"]):                     return "Stop"
+    if any(w in s for w in ["TIME", "TIME EXIT", "TIMED", "TIMEOUT"]):     return "Time"
     if any(w in s for w in ["MANUAL", "FLATTEN", "MKT CLOSE", "DISCRETIONARY"]): return "Manual"
     return "Close"
+
+# ===== Symbol normalization =====
+ROOT_RE = re.compile(r"^/?([A-Za-z]{1,3})(?:[FGHJKMNQUVXZ]\d{1,2})?$")  # e.g., /MESU25 or MESZ4
+
+def normalize_symbol(sym: str) -> str:
+    """Collapse variations like /MESU25 → /MES, MESZ4 → /MES; keep a leading slash."""
+    s = str(sym).strip()
+    if not s:
+        return "/UNK"
+    has_slash = s.startswith("/")
+    core = s[1:] if has_slash else s
+    m = ROOT_RE.match(core.upper())
+    if m:
+        root = m.group(1).upper()
+        return f"/{root}"
+    m2 = re.search(r"/([A-Za-z]{1,3})", s.upper())
+    if m2:
+        return f"/{m2.group(1)}"
+    m3 = re.search(r"\b([A-Za-z]{1,3})\b", s.upper())
+    return f"/{m3.group(1)}" if m3 else "/UNK"
 
 # =========================
 # Load & Clean (TOS Strategy Report)
@@ -163,15 +187,16 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     elif 'Qty' not in df.columns:
         df['Qty'] = np.nan
 
-    # Symbol/instrument
+    # Symbol/instrument normalization
     if 'Symbol' in df.columns:
-        df['Symbol'] = df['Symbol'].astype(str)
+        df['Symbol'] = df['Symbol'].astype(str).map(normalize_symbol)
     elif 'Instrument' in df.columns:
-        df['Symbol'] = df['Instrument'].astype(str)
+        df['Symbol'] = df['Instrument'].astype(str).map(normalize_symbol)
     else:
         s = df['Strategy'].astype(str) if 'Strategy' in df.columns else pd.Series([], dtype=str)
-        pat = re.compile(r"/([A-Z]{2,5})")
-        df['Symbol'] = s.str.extract(pat, expand=False)
+        pat = re.compile(r"/([A-Z]{1,3})")
+        sym_guess = s.str.extract(pat, expand=False).fillna("").map(lambda x: f"/{x}" if x else "/UNK")
+        df['Symbol'] = sym_guess.map(normalize_symbol)
 
     df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
     return df
@@ -206,7 +231,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                 exit_ = after_entry_close.iloc[0] if len(after_entry_close) else close_rows.iloc[-1]
 
                 entry_qty = _safe_num(entry.get('Qty'))
-                qty_abs = abs(entry_qty) if pd.notna(entry_qty) else 1.0
+                qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
 
                 direction = 'Unknown'
                 es = str(entry.get('Side', '')).upper()
@@ -230,10 +255,10 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                     'EntryQty': entry_qty,
                     'ExitQty': _safe_num(exit_.get('Qty')),
                     'QtyAbs': qty_abs,
-                    'TradePL': _safe_num(exit_.get('TradePL')),
-                    'GrossPL': _safe_num(exit_.get('TradePL')),
+                    'TradePL': trade_pl,
+                    'GrossPL': trade_pl,  # Gross before commissions
                     'Commission': commission,
-                    'NetPL': net_pl,
+                    'NetPL': net_pl,      # After commissions
                     'BaseStrategy': entry.get('BaseStrategy', 'Unknown'),
                     'StrategyRaw': entry.get('Strategy', ''),
                     'Symbol': entry.get('Symbol', ''),
@@ -263,8 +288,8 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                 'EntryQty': entry_qty,
                 'ExitQty': _safe_num(row.get('Qty')),
                 'QtyAbs': qty_abs,
-                'TradePL': _safe_num(row.get('TradePL')),
-                'GrossPL': _safe_num(row.get('TradePL')),
+                'TradePL': trade_pl,
+                'GrossPL': trade_pl,
                 'Commission': commission,
                 'NetPL': net_pl,
                 'BaseStrategy': row.get('BaseStrategy', 'Unknown'),
@@ -289,15 +314,20 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
 # =========================
 
 def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.DataFrame:
-    """Apply stop-loss normalization for Vercel compatibility"""
+    """
+    Apply SL normalization:
+      - Cap AdjustedNetPL at -$100 per trade (including commissions).
+      - Compute PointsPerContract off gross (price move) to avoid commission drag.
+    """
     df = trades.copy()
     df['SLBreached'] = df['NetPL'] < -100.0
-    df['SLCorrection'] = np.where(df['SLBreached'], (-df['NetPL']) - 100.0, 0.0)
+    # Adjusted Net P/L (after commissions), capped at -100
     df['AdjustedNetPL'] = np.where(df['SLBreached'], -100.0, df['NetPL'])
 
-    # Recompute points per contract on AdjustedNetPL
+    # Recompute points per contract from "gross-adjusted" P/L (exclude commissions for interpretability)
     qty_abs = pd.to_numeric(df['QtyAbs'], errors='coerce').replace(0, np.nan)
-    df['PointsPerContract'] = df['AdjustedNetPL'] / (point_value * qty_abs)
+    gross_adjusted = np.where(df['SLBreached'], -100.0 + df['Commission'], df['NetPL'] + df['Commission'])
+    df['PointsPerContract'] = gross_adjusted / (point_value * qty_abs)
 
     return df
 
@@ -337,15 +367,15 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
     # Expectancy
     expectancy_dollars = float(pl_net.mean()) if len(pl_net) else np.nan
 
-    # Risk-adjusted
+    # Risk-adjusted (per-trade returns vs initial capital; quick proxy)
     trade_rets = pl_net / cfg.initial_capital if cfg.initial_capital else pd.Series(np.nan, index=pl_net.index)
-    per_trade_sharpe = float(trade_rets.mean() / trade_rets.std(ddof=1)) if trade_rets.std(ddof=1) > 0 else np.nan
+    std = trade_rets.std(ddof=1)
+    per_trade_sharpe = float(trade_rets.mean() / std) if std and std > 0 else np.nan
 
     first_dt = pd.to_datetime(df['ExitTime']).min()
     last_dt  = pd.to_datetime(df['ExitTime']).max()
     days = max((last_dt - first_dt).days, 1) if pd.notna(first_dt) and pd.notna(last_dt) else 1
     trades_per_year = (len(df) / days * 252.0) if days and days > 0 else np.nan
-
     sharpe_annualized = float(np.sqrt(trades_per_year) * per_trade_sharpe) if trades_per_year and per_trade_sharpe == per_trade_sharpe else np.nan
 
     largest_win = float(pl_net.max()) if len(pl_net) else np.nan
@@ -391,7 +421,7 @@ def save_visuals_and_tables(trades_rth: pd.DataFrame, cfg: BacktestConfig, outdi
     plt.plot(equity.index, equity.values)
     plt.ylabel("Equity ($)")
     plt.xlabel("Trade #")
-    plt.title(f"Equity Curve — {cfg.strategy_name} ({cfg.timeframe}) [RTH]")
+    plt.title(f"Equity Curve — {cfg.strategy_name} ({cfg.timeframe}) [RTH, SL-adjusted]")
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, "equity_curve_180d.png"), dpi=160, bbox_inches='tight')
     plt.close()
@@ -402,7 +432,7 @@ def save_visuals_and_tables(trades_rth: pd.DataFrame, cfg: BacktestConfig, outdi
     plt.plot(dd.index, dd.values * 100.0)
     plt.ylabel("Drawdown (%)")
     plt.xlabel("Trade #")
-    plt.title("Drawdown Curve [RTH]")
+    plt.title("Drawdown Curve [RTH, SL-adjusted]")
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, "drawdown_curve.png"), dpi=160, bbox_inches='tight')
     plt.close()
@@ -410,7 +440,7 @@ def save_visuals_and_tables(trades_rth: pd.DataFrame, cfg: BacktestConfig, outdi
     # Histogram of trade P/L
     plt.figure(figsize=(9, 4.5))
     plt.hist(trades_rth['AdjustedNetPL'].dropna().values, bins=30)
-    plt.xlabel("Net P/L per Trade ($) — Adjusted")
+    plt.xlabel("Net P/L per Trade ($) — SL-adjusted")
     plt.ylabel("Count")
     plt.title("Trade P/L Distribution [RTH]")
     plt.tight_layout()
@@ -432,8 +462,8 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     # Strategy label pulled from CSV base strategy
     strategy_label = df_raw['BaseStrategy'].dropna().iloc[0] if 'BaseStrategy' in df_raw.columns and len(df_raw.dropna(subset=['BaseStrategy'])) else (cfg.strategy_name or 'Unknown')
 
-    # Set instrument label and point value
-    instr = (instrument or '/UNK')
+    # Normalize instrument and set point value
+    instr = normalize_symbol(instrument or '/UNK')
     cfg.strategy_name = strategy_label
 
     # Point value mapping
@@ -450,8 +480,11 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     # Build trades (all trades first)
     trades_all = build_trades(df_raw, cfg.commission_per_round_trip)
 
-    # Session tags
-    trades_all['Session'] = trades_all['EntryTime'].apply(_tag_session)
+    # Session tags — use EntryTime, fallback to ExitTime (mirrors RTH logic)
+    def _session_dt(row):
+        et = row.get('EntryTime')
+        return et if pd.notna(et) else row.get('ExitTime')
+    trades_all['Session'] = trades_all.apply(lambda r: _tag_session(_session_dt(r)), axis=1)
 
     # Apply stop-loss normalization
     trades_all = apply_stoploss_corrections(trades_all, cfg.point_value)
@@ -460,7 +493,7 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     trades_out = os.path.join(outdir, "trades_enriched.csv")
     trades_all.to_csv(trades_out, index=False)
 
-    # RTH subset
+    # RTH subset (EntryTime, fallback to ExitTime)
     def _rth_row(row):
         t = row['EntryTime']
         if pd.isna(t):
@@ -469,7 +502,7 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
 
     trades_rth = trades_all[trades_all.apply(_rth_row, axis=1)].copy()
 
-    # Metrics (RTH)
+    # Metrics (RTH, SL-adjusted)
     metrics = compute_metrics(trades_rth, cfg, scope_label="RTH")
     metrics["strategy_name"] = strategy_label
     metrics["instrument"] = instr
@@ -495,12 +528,19 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
 
     raw = load_tos_strategy_report(tos_csv_path)
 
-    # Detect instruments present
-    symbols = raw['Symbol'].dropna().unique().tolist() if 'Symbol' in raw.columns else []
+    # Ensure normalized symbols
+    if 'Symbol' in raw.columns:
+        raw['Symbol'] = raw['Symbol'].map(normalize_symbol)
+    else:
+        raw['Symbol'] = "/UNK"
+
+    # Detect instruments present (normalized roots)
+    symbols = raw['Symbol'].dropna().unique().tolist()
     if not symbols:
+        # Attempt extraction from Strategy text, normalize
         s = raw['Strategy'].astype(str) if 'Strategy' in raw.columns else pd.Series([], dtype=str)
-        pat = re.compile(r"/([A-Z]{2,5})")
-        symbols = s.str.extract(pat, expand=False).dropna().unique().tolist()
+        pat = re.compile(r"/([A-Z]{1,3})")
+        symbols = s.str.extract(pat, expand=False).dropna().map(lambda x: f"/{x}").map(normalize_symbol).unique().tolist()
     if not symbols:
         symbols = ['/MES']  # fallback default
 
@@ -511,7 +551,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     return results
 
 def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str) -> None:
-    """Generate simplified analytics markdown for Vercel"""
+    """Generate simplified analytics markdown for Vercel (charts appended at the bottom)."""
     os.makedirs(outdir, exist_ok=True)
     m = metrics
 
@@ -526,13 +566,20 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
         except Exception:
             return str(x)
 
+    first_dt = pd.to_datetime(trades_rth['ExitTime'], errors='coerce').min()
+    last_dt  = pd.to_datetime(trades_rth['ExitTime'], errors='coerce').max()
+    instrument = metrics.get('instrument', '/UNK')
+
     md = f"""
 # Strategy Analysis Report
 
 **Strategy:** {g('strategy_name')}  
+**Instrument:** {instrument}  
+**Date Range:** {first_dt.date() if pd.notna(first_dt) else 'n/a'} → {last_dt.date() if pd.notna(last_dt) else 'n/a'}  
 **Timeframe:** {g('timeframe')}  
 **Run Date:** {datetime.now().strftime('%Y-%m-%d')}  
 **Session Basis:** New York time (ET). **Metrics Scope:** {g('scope', 'RTH')} (09:30–16:00)  
+**P/L Basis:** *All KPIs computed on **SL-adjusted net P/L** (cap −$100 per trade including commissions).*  
 **Initial Capital:** ${_fmt(g('initial_capital'), 0)}  
 **Commission (RT / contract):** ${_fmt(cfg.commission_per_round_trip, 2)}  
 
@@ -558,6 +605,11 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Recovery Factor:** {_fmt(g('recovery_factor'))}
 
 ---
+
+## Charts
+![Equity Curve](equity_curve_180d.png)
+![Drawdown Curve](drawdown_curve.png)
+![Trade P/L Distribution](pl_histogram.png)
 
 *Report generated by DataAnalyzer v{cfg.version}*
 """
@@ -596,8 +648,7 @@ if __name__ == "__main__":
         print(f"[ERROR] No CSV files matched any of: {args.csv}", file=sys.stderr)
         sys.exit(1)
 
-    # global config (read by build_trades)
-    global cfg_global
+    # global config
     cfg_global = BacktestConfig(
         strategy_name="",  # will be set from CSV
         instruments=("/MES",),
