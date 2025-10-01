@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
-# Hybrid Backtester: Best of Both Codes
-# Combines Code 1's comprehensive metrics, visuals, and robustness with Code 2's simplicity and serverless optimization.
-# Key Improvements:
-# - Full metrics from Code 1 (core, efficiency, effectiveness, direction-specific BTO/STO).
-# - Lean helpers and minimal dependencies from Code 2.
-# - Robust trade pairing with unpaired order handling and warnings.
-# - Error-free for provided CSV (383 orders → 191 trades, ignoring unpaired ID 383).
-# - Serverless-compatible: Uses /tmp, Agg backend, no external dependencies.
-# - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts.
-# - No volatility binning or advanced metrics to avoid errors; focus on reliability.
+# Hybrid Backtester: Optimized for Vercel deployment
+# Combines comprehensive metrics, visuals, and robustness with serverless efficiency
+# - Stop-loss cap: -$100 per trade per contract
+# - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts
+# - Fixes: Added observed=False to groupby, restored generate_analytics_md
+# - Verified error-free on StrategyReports_RTH15_v7_43_Date93025.csv (383 orders → 191 trades)
 
 import os
 import io
@@ -39,7 +35,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.4.2"  # Hybrid version
+    version: str = "1.4.3"  # Updated for FutureWarning and NameError fixes
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -206,14 +202,19 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
         return pd.to_numeric(x, errors='coerce')
     OPEN_RX = r"\b(?:BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN|STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT|OPEN)\b"
     CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)\b"
-    i = 0
     unpaired_count = 0
+    i = 0
     while i < len(df) - 1:
         entry = df.iloc[i]
         exit_ = df.iloc[i + 1]
         side_entry = str(entry['Side']).upper()
         side_exit = str(exit_['Side']).upper()
         if re.search(OPEN_RX, side_entry) and re.search(CLOSE_RX, side_exit):
+            if exit_['Date'] < entry['Date']:
+                warnings.warn(f"Invalid trade pair: Exit time ({exit_['Date']}) before entry time ({entry['Date']}) at index {i}. Skipping.")
+                i += 1
+                unpaired_count += 1
+                continue
             entry_qty = _safe_num(entry.get('Qty'))
             qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
             direction = 'Unknown'
@@ -252,9 +253,10 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
             unpaired_count += 1
             i += 1
     if unpaired_count > 0:
-        print(f"Warning: {unpaired_count} unpaired orders skipped.")
+        warnings.warn(f"Found {unpaired_count} unpaired orders in the dataset. {len(df) - len(trades) * 2} orders were not included in trades.")
     t = pd.DataFrame(trades)
     if t.empty:
+        warnings.warn("No valid trades constructed from the dataset.")
         return t.assign(HoldMins=np.nan)
     t = t.sort_values('ExitTime').reset_index(drop=True)
     t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
@@ -278,6 +280,56 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
 # =========================
 
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str) -> dict:
+    if trades_df.empty:
+        warnings.warn("Empty trades DataFrame. Returning default metrics with NaN values.")
+        return {
+            "scope": scope_label,
+            "strategy_name": cfg.strategy_name,
+            "version": cfg.version,
+            "timeframe": cfg.timeframe,
+            "initial_capital": cfg.initial_capital,
+            "point_value": cfg.point_value,
+            "num_trades": 0,
+            "net_profit": np.nan,
+            "gross_profit": np.nan,
+            "total_return_pct": np.nan,
+            "profit_factor": np.nan,
+            "win_rate_pct": np.nan,
+            "avg_win_dollars": np.nan,
+            "avg_loss_dollars": np.nan,
+            "expectancy_per_trade_dollars": np.nan,
+            "max_drawdown_pct": np.nan,
+            "max_drawdown_dollars": np.nan,
+            "recovery_factor": np.nan,
+            "sharpe_annualized": np.nan,
+            "largest_winning_trade": np.nan,
+            "largest_losing_trade": np.nan,
+            "avg_hold_winners_mins": np.nan,
+            "avg_hold_losers_mins": np.nan,
+            "median_hold_mins": np.nan,
+            "longest_hold_mins": np.nan,
+            "shortest_hold_mins": np.nan,
+            "hold_distribution": {"0-15": 0, "15-60": 0, "60-180": 0, ">180": 0},
+            "session_counts": {"PRE": 0, "OPEN": 0, "LUNCH": 0, "CLOSING": 0, "OTHER": 0},
+            "session_expectancy": {"PRE": np.nan, "OPEN": np.nan, "LUNCH": np.nan, "CLOSING": np.nan, "OTHER": np.nan},
+            "dow_metrics": {day: {"win_rate": np.nan, "net_pl": np.nan, "expectancy": np.nan} for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']},
+            "expectancy_by_hold": {"0-15": np.nan, "15-60": np.nan, "60-180": np.nan, ">180": np.nan},
+            "capital_efficiency": np.nan,
+            "concentration_risk_pct": np.nan,
+            "day_part_expectancy": {"EARLY": np.nan, "MID": np.nan, "LATE": np.nan, "OTHER": np.nan},
+            "num_trades_long": 0,
+            "win_rate_long_pct": np.nan,
+            "net_profit_long": np.nan,
+            "avg_win_long": np.nan,
+            "avg_loss_long": np.nan,
+            "expectancy_long": np.nan,
+            "num_trades_short": 0,
+            "win_rate_short_pct": np.nan,
+            "net_profit_short": np.nan,
+            "avg_win_short": np.nan,
+            "avg_loss_short": np.nan,
+            "expectancy_short": np.nan
+        }
     df = trades_df.copy()
     if 'AdjustedNetPL' not in df.columns:
         raise RuntimeError("AdjustedNetPL missing; call apply_stoploss_corrections() before compute_metrics().")
@@ -291,15 +343,15 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     loss_mask = pl_net < 0
     avg_win = float(pl_net[win_mask].mean()) if win_mask.any() else np.nan
     avg_loss = float(pl_net[loss_mask].mean()) if loss_mask.any() else np.nan
-    max_dd_pct = abs(_max_drawdown(equity)) * 100.0
-    max_dd_dollars = float((equity.cummax() - equity).max())
-    recovery_factor = float(total_net / max_dd_dollars) if max_dd_dollars else np.nan
+    max_dd_pct = abs(_max_drawdown(equity)) * 100.0 if not equity.empty else np.nan
+    max_dd_dollars = float((equity.cummax() - equity).max()) if not equity.empty else np.nan
+    recovery_factor = float(total_net / max_dd_dollars) if max_dd_dollars and max_dd_dollars != 0 else np.nan
     expectancy_dollars = float(pl_net.mean()) if len(pl_net) else np.nan
     trade_rets = pl_net / cfg.initial_capital if cfg.initial_capital else pd.Series(np.nan, index=pl_net.index)
-    std = trade_rets.std(ddof=1)
+    std = trade_rets.std(ddof=1) if len(trade_rets) > 1 else np.nan
     per_trade_sharpe = float(trade_rets.mean() / std) if std and std > 0 else np.nan
-    first_dt = pd.to_datetime(df['ExitTime']).min()
-    last_dt = pd.to_datetime(df['ExitTime']).max()
+    first_dt = pd.to_datetime(df['ExitTime']).min() if not df['ExitTime'].empty else pd.NaT
+    last_dt = pd.to_datetime(df['ExitTime']).max() if not df['ExitTime'].empty else pd.NaT
     days = max((last_dt - first_dt).days, 1) if pd.notna(first_dt) and pd.notna(last_dt) else 1
     trades_per_year = (len(df) / days * 252.0) if days and days > 0 else np.nan
     sharpe_annualized = float(np.sqrt(trades_per_year) * per_trade_sharpe) if trades_per_year and per_trade_sharpe == per_trade_sharpe else np.nan
@@ -329,7 +381,7 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
             'net_pl': float(day_df['AdjustedNetPL'].sum()) if len(day_df) else np.nan,
             'expectancy': float(day_df['AdjustedNetPL'].mean()) if len(day_df) else np.nan
         }
-    expectancy_by_hold = df.groupby('HoldBin')['AdjustedNetPL'].mean().reindex(hold_labels).fillna(np.nan).to_dict()
+    expectancy_by_hold = df.groupby('HoldBin', observed=False)['AdjustedNetPL'].mean().reindex(hold_labels).fillna(np.nan).to_dict()
     avg_capital_per_trade = df['EntryPrice'] * df['QtyAbs'] * cfg.point_value
     avg_hold_mins = df['HoldMins'].mean() if len(df['HoldMins'].dropna()) else 1.0
     capital_efficiency = total_net / (avg_capital_per_trade.mean() * avg_hold_mins) if avg_capital_per_trade.mean() else np.nan
@@ -364,7 +416,7 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
         "gross_profit": total_gross,
         "total_return_pct": total_return_pct,
         "profit_factor": _profit_factor(pl_net),
-        "win_rate_pct": float((pl_net > 0).mean() * 100.0),
+        "win_rate_pct": float((pl_net > 0).mean() * 100.0) if len(pl_net) else np.nan,
         "avg_win_dollars": avg_win,
         "avg_loss_dollars": avg_loss,
         "expectancy_per_trade_dollars": expectancy_dollars,
@@ -418,8 +470,8 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"equity_curve_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
-    dd = equity / equity.cummax() - 1.0
     plt.figure(figsize=(9, 4.5))
+    dd = equity / equity.cummax() - 1.0
     plt.plot(dd.index, dd.values * 100.0)
     plt.ylabel("Drawdown (%)")
     plt.xlabel("Trade #")
@@ -448,6 +500,150 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     monthly = monthly.dropna().resample('ME').sum()
     monthly['ReturnPct'] = monthly['NetPL'] / cfg.initial_capital * 100.0
     monthly.to_csv(os.path.join(outdir, f"monthly_performance_{title_suffix.lower()}.csv"))
+
+# =========================
+# Analytics Markdown Generation
+# =========================
+
+def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str) -> None:
+    os.makedirs(outdir, exist_ok=True)
+    m = metrics
+    def g(key, default=np.nan):
+        return m.get(key, default)
+    def _fmt(x, p=2, pct=False):
+        try:
+            if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
+                return "n/a"
+            return (f"{x:.{p}f}%" if pct else f"{x:.{p}f}")
+        except Exception:
+            return str(x)
+    first_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').min()
+    last_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').max()
+    instrument = g('instrument', '/UNK')
+    md = f"""
+# Strategy Analysis Report
+**Strategy:** {g('strategy_name')}
+**Instrument:** {instrument}
+**Date Range (ALL):** {first_dt_all.date() if pd.notna(first_dt_all) else 'n/a'} → {last_dt_all.date() if pd.notna(last_dt_all) else 'n/a'}
+**Timeframe:** {g('timeframe')}
+**Run Date:** {datetime.now().strftime('%Y-%m-%d')}
+**Session Basis:** New York time (ET)
+**P/L Basis:** *All KPIs computed on **SL-adjusted net P/L** (cap −$100 per trade including commissions).*
+**Trades:** ALL = {int(g('num_trades_all', 0))} | RTH = {int(g('num_trades_rth', 0))}
+---
+## Key Performance Indicators — ALL Sessions
+- **Net Profit (ALL):** ${_fmt(g('net_profit'))}
+- **Total Return (ALL):** ${_fmt(g('total_return_pct'), pct=True)}
+- **Win Rate (ALL):** ${_fmt(g('win_rate_pct'), pct=True)}
+- **Profit Factor (ALL):** ${_fmt(g('profit_factor'))}
+- **Max Drawdown (ALL):** ${_fmt(g('max_drawdown_dollars'))} ({_fmt(g('max_drawdown_pct'), pct=True)} — max % drop from peak equity using SL-adjusted P/L)
+- **Sharpe (Annualized, ALL):** ${_fmt(g('sharpe_annualized'))}
+- **Total Trades (ALL):** {int(g('num_trades', 0))}
+---
+## RTH Snapshot (09:30–16:00 ET)
+- **Net Profit (RTH):** ${_fmt(g('RTH_net_profit'))}
+- **Win Rate (RTH):** ${_fmt(g('RTH_win_rate_pct'), pct=True)}
+- **Profit Factor (RTH):** ${_fmt(g('RTH_profit_factor'))}
+- **Max Drawdown (RTH):** ${_fmt(g('RTH_max_drawdown_dollars'))} ({_fmt(g('RTH_max_drawdown_pct'), pct=True)})
+- **Sharpe (Annualized, RTH):** ${_fmt(g('RTH_sharpe_annualized'))}
+- **Total Trades (RTH):** {int(g('num_trades_rth', 0))}
+---
+## Efficiency Metrics
+### Holding Time Analysis
+- **Average Hold Time (Winners):** ${_fmt(g('avg_hold_winners_mins'))} minutes
+- **Average Hold Time (Losers):** ${_fmt(g('avg_hold_losers_mins'))} minutes
+- **Median Hold Time:** ${_fmt(g('median_hold_mins'))} minutes
+- **Longest Hold Time:** ${_fmt(g('longest_hold_mins'))} minutes
+- **Shortest Hold Time:** ${_fmt(g('shortest_hold_mins'))} minutes
+- **Hold Time Distribution:**
+  - 0–15 min: {int(g('hold_distribution').get('0-15', 0))} trades
+  - 15–60 min: {int(g('hold_distribution').get('15-60', 0))} trades
+  - 60–180 min: {int(g('hold_distribution').get('60-180', 0))} trades
+  - >180 min: {int(g('hold_distribution').get('>180', 0))} trades
+### Trade Frequency by Session
+- **Trade Counts by Session:**
+  - PRE: {int(g('session_counts').get('PRE', 0))} trades
+  - OPEN: {int(g('session_counts').get('OPEN', 0))} trades
+  - LUNCH: {int(g('session_counts').get('LUNCH', 0))} trades
+  - CLOSING: {int(g('session_counts').get('CLOSING', 0))} trades
+  - OTHER: {int(g('session_counts').get('OTHER', 0))} trades
+- **Expectancy by Session:**
+  - PRE: ${_fmt(g('session_expectancy').get('PRE', np.nan))}
+  - OPEN: ${_fmt(g('session_expectancy').get('OPEN', np.nan))}
+  - LUNCH: ${_fmt(g('session_expectancy').get('LUNCH', np.nan))}
+  - CLOSING: ${_fmt(g('session_expectancy').get('CLOSING', np.nan))}
+  - OTHER: ${_fmt(g('session_expectancy').get('OTHER', np.nan))}
+### Day of Week Performance
+- **Monday:**
+  - Win Rate: {_fmt(g('dow_metrics').get('Monday', {}).get('win_rate', np.nan), pct=True)}
+  - Net P/L: ${_fmt(g('dow_metrics').get('Monday', {}).get('net_pl', np.nan))}
+  - Expectancy: ${_fmt(g('dow_metrics').get('Monday', {}).get('expectancy', np.nan))}
+- **Tuesday:**
+  - Win Rate: {_fmt(g('dow_metrics').get('Tuesday', {}).get('win_rate', np.nan), pct=True)}
+  - Net P/L: ${_fmt(g('dow_metrics').get('Tuesday', {}).get('net_pl', np.nan))}
+  - Expectancy: ${_fmt(g('dow_metrics').get('Tuesday', {}).get('expectancy', np.nan))}
+- **Wednesday:**
+  - Win Rate: {_fmt(g('dow_metrics').get('Wednesday', {}).get('win_rate', np.nan), pct=True)}
+  - Net P/L: ${_fmt(g('dow_metrics').get('Wednesday', {}).get('net_pl', np.nan))}
+  - Expectancy: ${_fmt(g('dow_metrics').get('Wednesday', {}).get('expectancy', np.nan))}
+- **Thursday:**
+  - Win Rate: {_fmt(g('dow_metrics').get('Thursday', {}).get('win_rate', np.nan), pct=True)}
+  - Net P/L: ${_fmt(g('dow_metrics').get('Thursday', {}).get('net_pl', np.nan))}
+  - Expectancy: ${_fmt(g('dow_metrics').get('Thursday', {}).get('expectancy', np.nan))}
+- **Friday:**
+  - Win Rate: {_fmt(g('dow_metrics').get('Friday', {}).get('win_rate', np.nan), pct=True)}
+  - Net P/L: ${_fmt(g('dow_metrics').get('Friday', {}).get('net_pl', np.nan))}
+  - Expectancy: ${_fmt(g('dow_metrics').get('Friday', {}).get('expectancy', np.nan))}
+---
+## Effectiveness Metrics
+### Expectancy by Trade Length
+- 0–15 min: ${_fmt(g('expectancy_by_hold').get('0-15', np.nan))}
+- 15–60 min: ${_fmt(g('expectancy_by_hold').get('15-60', np.nan))}
+- 60–180 min: ${_fmt(g('expectancy_by_hold').get('60-180', np.nan))}
+- >180 min: ${_fmt(g('expectancy_by_hold').get('>180', np.nan))}
+### Capital Efficiency
+- **Net Profit per Trade-Minute of Capital:** ${_fmt(g('capital_efficiency'), 4)} per dollar-minute
+### Concentration Risk
+- **% of Net Profit from Top 10% of Trades:** ${_fmt(g('concentration_risk_pct'), pct=True)}
+### Trade Outcome by Day Part
+- **Early (09:30–11:30):** ${_fmt(g('day_part_expectancy').get('EARLY', np.nan))}
+- **Mid (11:30–14:00):** ${_fmt(g('day_part_expectancy').get('MID', np.nan))}
+- **Late (14:00–16:00):** ${_fmt(g('day_part_expectancy').get('LATE', np.nan))}
+- **Other:** ${_fmt(g('day_part_expectancy').get('OTHER', np.nan))}
+---
+## Performance by Direction
+- **Long Trades:**
+  - Number of Trades: {int(g('num_trades_long', 0))}
+  - Win Rate: {_fmt(g('win_rate_long_pct'), pct=True)}
+  - Net Profit: ${_fmt(g('net_profit_long'))}
+  - Average Win: ${_fmt(g('avg_win_long'))}
+  - Average Loss: ${_fmt(g('avg_loss_long'))}
+  - Expectancy: ${_fmt(g('expectancy_long'))}
+- **Short Trades:**
+  - Number of Trades: {int(g('num_trades_short', 0))}
+  - Win Rate: {_fmt(g('win_rate_short_pct'), pct=True)}
+  - Net Profit: ${_fmt(g('net_profit_short'))}
+  - Average Win: {_fmt(g('avg_win_short'))}
+  - Average Loss: {_fmt(g('avg_loss_short'))}
+  - Expectancy: ${_fmt(g('expectancy_short'))}
+---
+## Performance Details — ALL
+- **Average Win:** ${_fmt(g('avg_win_dollars'))}
+- **Average Loss:** ${_fmt(g('avg_loss_dollars'))}
+- **Expectancy per Trade:** ${_fmt(g('expectancy_per_trade_dollars'))}
+- **Largest Win:** ${_fmt(g('largest_winning_trade'))}
+- **Largest Loss:** ${_fmt(g('largest_losing_trade'))}
+- **Recovery Factor:** ${_fmt(g('recovery_factor'))}
+---
+## Charts
+![Equity Curve (ALL)](equity_curve_all.png)
+![Drawdown Curve (ALL)](drawdown_curve_all.png)
+![Trade P/L Distribution (ALL)](pl_histogram_all.png)
+![Hold Time Distribution (ALL)](hold_time_histogram_all.png)
+*Report generated by DataAnalyzer v{cfg.version}*
+"""
+    with open(os.path.join(outdir, "analytics.md"), "w", encoding="utf-8") as f:
+        f.write(md)
 
 # =========================
 # Main runner
@@ -540,13 +736,13 @@ if __name__ == "__main__":
         print(f"[ERROR] No CSV files matched any of: {args.csv}", file=sys.stderr)
         sys.exit(1)
     cfg_global = BacktestConfig(
-        strategy_name="", # will be set from CSV
+        strategy_name="",
         instruments=("/MES",),
         timeframe=args.timeframe,
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.3.1",
+        version="1.4.3",
     )
     all_metrics = []
     for csv_path in csv_paths:
