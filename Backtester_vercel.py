@@ -37,7 +37,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.4.10"  # Updated for max_dd_pct fix
+    version: str = "1.4.11"  # Updated for max_dd_pct fix
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -291,6 +291,8 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str, non_rth_trades: int = 0) -> dict:
     if trades_df.empty:
         warnings.warn(f"Empty trades DataFrame for {scope_label}. Returning default metrics with NaN values.")
+        max_dd_pct = np.nan
+        max_dd_dollars = np.nan
         return {
             "scope": scope_label,
             "strategy_name": cfg.strategy_name,
@@ -326,8 +328,8 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
             "stops_sto_lt_20_points": 0,
             "stops_sto_eq_20_points": 0,
             "avg_stop_loss_sto_points": np.nan,
-            "max_drawdown_pct": np.nan,
-            "max_drawdown_dollars": np.nan,
+            "max_drawdown_pct": max_dd_pct,
+            "max_drawdown_dollars": max_dd_dollars,
             "recovery_factor": np.nan,
             "sharpe_annualized": np.nan,
             "largest_winning_trade": np.nan,
@@ -370,6 +372,8 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     pl_net = df['AdjustedNetPL'].fillna(0.0)
     pl_gross = df['GrossPL'].fillna(0.0) if 'GrossPL' in df.columns else pl_net.copy()
     equity = cfg.initial_capital + pl_net.cumsum()
+    max_dd_pct = abs(_max_drawdown(equity)) * 100.0 if not equity.empty else np.nan
+    max_dd_dollars = float((equity.cummax() - equity).max()) if not equity.empty else np.nan
     total_net = float(pl_net.sum())
     total_gross = float(pl_gross.sum())
     total_return_pct = (total_net / cfg.initial_capital) * 100.0 if cfg.initial_capital else np.nan
@@ -399,8 +403,6 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     stops_sto_lt_20_points = int((sto_stop_mask & (df['AdjustedNetPL'] > -100.0)).sum()) if total_stops_sto > 0 else 0
     stops_sto_eq_20_points = int((sto_stop_mask & (df['AdjustedNetPL'] == -100.0)).sum()) if total_stops_sto > 0 else 0
     avg_stop_loss_sto_points = float(df[sto_stop_mask]['PointsPerContract'].mean()) if total_stops_sto > 0 else np.nan
-    max_dd_pct = abs(_max_drawdown(equity)) * 100.0 if not equity.empty else np.nan
-    max_dd_dollars = float((equity.cummax() - equity).max()) if not equity.empty else np.nan
     recovery_factor = float(total_net / max_dd_dollars) if max_dd_dollars and max_dd_dollars != 0 else np.nan
     trade_rets = pl_net / cfg.initial_capital if cfg.initial_capital else pd.Series(np.nan, index=pl_net.index)
     std = trade_rets.std(ddof=1) if len(trade_rets) > 1 else np.nan
@@ -900,7 +902,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.4.10",
+        version="1.4.11",
     )
     all_metrics = []
     for csv_path in csv_paths:
