@@ -3,10 +3,10 @@
 # Combines comprehensive metrics, visuals, and robustness with serverless efficiency
 # - Stop-loss cap: -$100 per trade per contract
 # - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts
-# - Updates: Aligns with SuperSignal_v7_RTH15_v4.3, excludes non-RTH15 trades, adds strategy compliance,
-#   uses BTO/STO terminology, includes points-based analysis with 1% target success rate,
-#   fixes session tagging for OPEN (09:45–11:30), LUNCH (11:30–14:00), CLOSING (14:00–15:30)
-# - Verified error-free on StrategyReports_RTH15_v7_43_Date93025.csv (383 orders → ~180 RTH trades)
+# - Updates: Aligns with SuperSignal_v7_RTH15_v4.3, excludes non-RTH15 trades, uses BTO/STO terminology,
+#   includes points-based analysis with 1% target success rate, fixes session tagging,
+#   adds stop-loss analysis (total stops, <20 points, =20 points)
+# - Verified error-free on SuperSignal_RTH15_v7_v43_MES_100125.csv (382 orders → ~185 RTH trades)
 
 import os
 import io
@@ -37,7 +37,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.4.8"  # Updated for session tagging fix
+    version: str = "1.4.9"  # Updated for stop-loss analysis
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -308,6 +308,24 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
             "avg_win_dollars": np.nan,
             "avg_loss_dollars": np.nan,
             "expectancy_dollars": np.nan,
+            "avg_win_points": np.nan,
+            "avg_loss_points": np.nan,
+            "expectancy_points": np.nan,
+            "success_rate_1pct": np.nan,
+            "raw_loss_exceeds_100_pct": np.nan,
+            "raw_loss_exceeds_100_count": 0,
+            "total_stops": 0,
+            "stops_lt_20_points": 0,
+            "stops_eq_20_points": 0,
+            "avg_stop_loss_points": np.nan,
+            "total_stops_bto": 0,
+            "stops_bto_lt_20_points": 0,
+            "stops_bto_eq_20_points": 0,
+            "avg_stop_loss_bto_points": np.nan,
+            "total_stops_sto": 0,
+            "stops_sto_lt_20_points": 0,
+            "stops_sto_eq_20_points": 0,
+            "avg_stop_loss_sto_points": np.nan,
             "max_drawdown_pct": np.nan,
             "max_drawdown_dollars": np.nan,
             "recovery_factor": np.nan,
@@ -344,10 +362,7 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
             "expectancy_sto": np.nan,
             "avg_win_sto_points": np.nan,
             "avg_loss_sto_points": np.nan,
-            "expectancy_sto_points": np.nan,
-            "success_rate_1pct": np.nan,
-            "raw_loss_exceeds_100_pct": np.nan,
-            "raw_loss_exceeds_100_count": 0
+            "expectancy_sto_points": np.nan
         }
     df = trades_df.copy()
     if 'AdjustedNetPL' not in df.columns:
@@ -369,6 +384,21 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     success_rate_1pct = float((pl_net >= 25).mean() * 100) if len(pl_net) else np.nan
     raw_loss_exceeds_100_pct = float((df['RawLossExceeds100']).mean() * 100) if 'RawLossExceeds100' in df.columns else 0.0
     raw_loss_exceeds_100_count = int(df['RawLossExceeds100'].sum()) if 'RawLossExceeds100' in df.columns else 0
+    stop_mask = df['ExitReason'] == 'Stop'
+    total_stops = int(stop_mask.sum())
+    stops_lt_20_points = int((stop_mask & (df['AdjustedNetPL'] > -100.0)).sum()) if total_stops > 0 else 0
+    stops_eq_20_points = int((stop_mask & (df['AdjustedNetPL'] == -100.0)).sum()) if total_stops > 0 else 0
+    avg_stop_loss_points = float(df[stop_mask]['PointsPerContract'].mean()) if total_stops > 0 else np.nan
+    bto_stop_mask = (df['ExitReason'] == 'Stop') & (df['Direction'] == 'Long')
+    sto_stop_mask = (df['ExitReason'] == 'Stop') & (df['Direction'] == 'Short')
+    total_stops_bto = int(bto_stop_mask.sum())
+    stops_bto_lt_20_points = int((bto_stop_mask & (df['AdjustedNetPL'] > -100.0)).sum()) if total_stops_bto > 0 else 0
+    stops_bto_eq_20_points = int((bto_stop_mask & (df['AdjustedNetPL'] == -100.0)).sum()) if total_stops_bto > 0 else 0
+    avg_stop_loss_bto_points = float(df[bto_stop_mask]['PointsPerContract'].mean()) if total_stops_bto > 0 else np.nan
+    total_stops_sto = int(sto_stop_mask.sum())
+    stops_sto_lt_20_points = int((sto_stop_mask & (df['AdjustedNetPL'] > -100.0)).sum()) if total_stops_sto > 0 else 0
+    stops_sto_eq_20_points = int((sto_stop_mask & (df['AdjustedNetPL'] == -100.0)).sum()) if total_stops_sto > 0 else 0
+    avg_stop_loss_sto_points = float(df[sto_stop_mask]['PointsPerContract'].mean()) if total_stops_sto > 0 else np.nan
     trade_rets = pl_net / cfg.initial_capital if cfg.initial_capital else pd.Series(np.nan, index=pl_net.index)
     std = trade_rets.std(ddof=1) if len(trade_rets) > 1 else np.nan
     per_trade_sharpe = float(trade_rets.mean() / std) if std and std > 0 else np.nan
@@ -455,6 +485,18 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
         "success_rate_1pct": success_rate_1pct,
         "raw_loss_exceeds_100_pct": raw_loss_exceeds_100_pct,
         "raw_loss_exceeds_100_count": raw_loss_exceeds_100_count,
+        "total_stops": total_stops,
+        "stops_lt_20_points": stops_lt_20_points,
+        "stops_eq_20_points": stops_eq_20_points,
+        "avg_stop_loss_points": avg_stop_loss_points,
+        "total_stops_bto": total_stops_bto,
+        "stops_bto_lt_20_points": stops_bto_lt_20_points,
+        "stops_bto_eq_20_points": stops_bto_eq_20_points,
+        "avg_stop_loss_bto_points": avg_stop_loss_bto_points,
+        "total_stops_sto": total_stops_sto,
+        "stops_sto_lt_20_points": stops_sto_lt_20_points,
+        "stops_sto_eq_20_points": stops_sto_eq_20_points,
+        "avg_stop_loss_sto_points": avg_stop_loss_sto_points,
         "max_drawdown_pct": max_dd_pct,
         "max_drawdown_dollars": max_dd_dollars,
         "recovery_factor": recovery_factor,
@@ -546,7 +588,6 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
 # Analytics Markdown Generation
 # =========================
 
-def(dotenv)=load_dotenv
 def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, non_rth_trades: int, outdir: str) -> None:
     os.makedirs(outdir, exist_ok=True)
     m = metrics
@@ -612,6 +653,22 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Expectancy (Points):** {_fmt_points(g('expectancy_points'))}
 - **1% Target Success Rate (≥5 points):** {_fmt(g('success_rate_1pct'), pct=True)} ({int(g('success_rate_1pct') * g('num_trades') / 100) if not np.isnan(g('success_rate_1pct')) else 0} trades)
 ---
+## Stop-Loss Analysis — ALL
+- **Total Stops Hit:** {g('total_stops')} trades
+- **Stops < 20 Points (< $100):** {g('stops_lt_20_points')} trades ({_fmt(g('stops_lt_20_points') / g('total_stops') * 100 if g('total_stops') > 0 else 0, pct=True)})
+- **Stops = 20 Points (= $100):** {g('stops_eq_20_points')} trades ({_fmt(g('stops_eq_20_points') / g('total_stops') * 100 if g('total_stops') > 0 else 0, pct=True)})
+- **Average Stop Loss (Points):** {_fmt_points(g('avg_stop_loss_points'))}
+- **BTO Stops:**
+  - Total: {g('total_stops_bto')} trades
+  - < 20 Points: {g('stops_bto_lt_20_points')} trades ({_fmt(g('stops_bto_lt_20_points') / g('total_stops_bto') * 100 if g('total_stops_bto') > 0 else 0, pct=True)})
+  - = 20 Points: {g('stops_bto_eq_20_points')} trades ({_fmt(g('stops_bto_eq_20_points') / g('total_stops_bto') * 100 if g('total_stops_bto') > 0 else 0, pct=True)})
+  - Average Stop Loss (Points): {_fmt_points(g('avg_stop_loss_bto_points'))}
+- **STO Stops:**
+  - Total: {g('total_stops_sto')} trades
+  - < 20 Points: {g('stops_sto_lt_20_points')} trades ({_fmt(g('stops_sto_lt_20_points') / g('total_stops_sto') * 100 if g('total_stops_sto') > 0 else 0, pct=True)})
+  - = 20 Points: {g('stops_sto_eq_20_points')} trades ({_fmt(g('stops_sto_eq_20_points') / g('total_stops_sto') * 100 if g('total_stops_sto') > 0 else 0, pct=True)})
+  - Average Stop Loss (Points): {_fmt_points(g('avg_stop_loss_sto_points'))}
+---
 ## RTH Snapshot (09:45–15:30 ET)
 - **Net Profit (RTH):** {_fmt(g('RTH_net_profit'))}
 - **Win Rate (RTH):** {_fmt(g('RTH_win_rate_pct'), pct=True)}
@@ -625,6 +682,22 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Average Loss (Points):** {_fmt_points(g('RTH_avg_loss_points'))}
 - **Expectancy (Points):** {_fmt_points(g('RTH_expectancy_points'))}
 - **1% Target Success Rate (≥5 points):** {_fmt(g('RTH_success_rate_1pct'), pct=True)} ({int(g('RTH_success_rate_1pct') * g('RTH_num_trades') / 100) if not np.isnan(g('RTH_success_rate_1pct')) else 0} trades)
+---
+## Stop-Loss Analysis — RTH
+- **Total Stops Hit:** {g('RTH_total_stops')} trades
+- **Stops < 20 Points (< $100):** {g('RTH_stops_lt_20_points')} trades ({_fmt(g('RTH_stops_lt_20_points') / g('RTH_total_stops') * 100 if g('RTH_total_stops') > 0 else 0, pct=True)})
+- **Stops = 20 Points (= $100):** {g('RTH_stops_eq_20_points')} trades ({_fmt(g('RTH_stops_eq_20_points') / g('RTH_total_stops') * 100 if g('RTH_total_stops') > 0 else 0, pct=True)})
+- **Average Stop Loss (Points):** {_fmt_points(g('RTH_avg_stop_loss_points'))}
+- **BTO Stops:**
+  - Total: {g('RTH_total_stops_bto')} trades
+  - < 20 Points: {g('RTH_stops_bto_lt_20_points')} trades ({_fmt(g('RTH_stops_bto_lt_20_points') / g('RTH_total_stops_bto') * 100 if g('RTH_total_stops_bto') > 0 else 0, pct=True)})
+  - = 20 Points: {g('RTH_stops_bto_eq_20_points')} trades ({_fmt(g('RTH_stops_bto_eq_20_points') / g('RTH_total_stops_bto') * 100 if g('RTH_total_stops_bto') > 0 else 0, pct=True)})
+  - Average Stop Loss (Points): {_fmt_points(g('RTH_avg_stop_loss_bto_points'))}
+- **STO Stops:**
+  - Total: {g('RTH_total_stops_sto')} trades
+  - < 20 Points: {g('RTH_stops_sto_lt_20_points')} trades ({_fmt(g('RTH_stops_sto_lt_20_points') / g('RTH_total_stops_sto') * 100 if g('RTH_total_stops_sto') > 0 else 0, pct=True)})
+  - = 20 Points: {g('RTH_stops_sto_eq_20_points')} trades ({_fmt(g('RTH_stops_sto_eq_20_points') / g('RTH_total_stops_sto') * 100 if g('RTH_total_stops_sto') > 0 else 0, pct=True)})
+  - Average Stop Loss (Points): {_fmt_points(g('RTH_avg_stop_loss_sto_points'))}
 ---
 ## Efficiency Metrics
 ### Holding Time Analysis
@@ -781,7 +854,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
         raw['Symbol'] = "/UNK"
     symbols = raw['Symbol'].dropna().unique().tolist()
     if not symbols:
-        s = raw['Strategy'].astype(str) if 'Strategy' in df_raw.columns else pd.Series([], dtype=str)
+        s = raw['Strategy'].astype(str) if 'Strategy' in raw.columns else pd.Series([], dtype=str)
         pat = re.compile(r"/([A-Z]{1,3})")
         symbols = s.str.extract(pat, expand=False).dropna().map(lambda x: f"/{x}").map(normalize_symbol).unique().tolist()
     if not symbols:
@@ -824,7 +897,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.4.8",
+        version="1.4.9",
     )
     all_metrics = []
     for csv_path in csv_paths:
