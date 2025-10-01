@@ -31,7 +31,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.3.4"  # Updated for volatility binning and observed warning fixes
+    version: str = "1.3.5"  # Updated for NameError and volatility warning fixes
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -275,7 +275,10 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
 # Metrics
 # =========================
 
+_volatility_warning_emitted = False  # Global flag to prevent duplicate warnings
+
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str) -> dict:
+    global _volatility_warning_emitted
     if trades_df.empty:
         warnings.warn("Empty trades DataFrame. Returning default metrics with NaN values.")
         return {
@@ -473,8 +476,9 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     daily_vol = daily_vol[daily_counts >= 2]
     vol_mean = daily_vol.mean() if not daily_vol.empty else 0
     vol_std = daily_vol.std() if not daily_vol.empty else 0
-    if vol_std == 0 or np.isnan(vol_std) or vol_mean < 0.01:
+    if (vol_std == 0 or np.isnan(vol_std) or vol_mean < 0.01) and not _volatility_warning_emitted:
         warnings.warn("Insufficient price volatility for binning. Using default volatility bins.")
+        _volatility_warning_emitted = True
         vol_bins = [0, 1, 10, float('inf')]
     else:
         vol_bins = [0, max(vol_mean - vol_std, 0), vol_mean + vol_std, float('inf')]
@@ -635,6 +639,204 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     monthly.to_csv(os.path.join(outdir, f"monthly_performance_{title_suffix.lower()}.csv"))
 
 # =========================
+# Analytics Markdown Generation
+# =========================
+
+def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str) -> None:
+    os.makedirs(outdir, exist_ok=True)
+    m = metrics
+    def g(key, default=np.nan):
+        return m.get(key, default)
+    def _fmt(x, p=2, pct=False):
+        try:
+            if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
+                return "n/a"
+            return (f"{x:.{p}f}%" if pct else f"{x:.{p}f}")
+        except Exception:
+            return str(x)
+    first_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').min()
+    last_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').max()
+    instrument = g('instrument', '/UNK')
+    monthly_metrics_str = "\n".join([f"- **{period}:**\n  - Net P/L: ${_fmt(m['net_pl'])}\n  - Win Rate: {_fmt(m['win_rate'], pct=True)}\n  - Expectancy: ${_fmt(m['expectancy'])}" for period, m in g('monthly_metrics', {}).items()])
+    quarterly_metrics_str = "\n".join([f"- **{period}:**\n  - Net P/L: ${_fmt(m['net_pl'])}\n  - Win Rate: {_fmt(m['win_rate'], pct=True)}\n  - Expectancy: ${_fmt(m['expectancy'])}" for period, m in g('quarterly_metrics', {}).items()])
+    md = f"""
+# Strategy Analysis Report
+**Strategy:** {g('strategy_name')}
+**Instrument:** {instrument}
+**Date Range (ALL):** {first_dt_all.date() if pd.notna(first_dt_all) else 'n/a'} → {last_dt_all.date() if pd.notna(last_dt_all) else 'n/a'}
+**Timeframe:** {g('timeframe')}
+**Run Date:** {datetime.now().strftime('%Y-%m-%d')}
+**Session Basis:** New York time (ET)
+**P/L Basis:** *All KPIs computed on **SL-adjusted net P/L** (cap −$100 per trade including commissions).*
+**Trades:** ALL = {int(g('num_trades_all', 0))} | RTH = {int(g('num_trades_rth', 0))}
+---
+## Key Performance Indicators — ALL Sessions
+- **Net Profit (ALL):** ${_fmt(g('net_profit'))}
+- **Total Return (ALL):** {_fmt(g('total_return_pct'), pct=True)}
+- **Profit Factor (ALL):** {_fmt(g('profit_factor'))}
+- **Win Rate (ALL):** {_fmt(g('win_rate_pct'), pct=True)}
+- **Win/Loss Ratio:** {_fmt(g('win_loss_ratio'))}
+- **Risk-Reward Ratio:** {_fmt(g('risk_reward_ratio'))}
+- **Breakeven Win Rate:** {_fmt(g('breakeven_win_rate'), pct=True)}
+- **Max Drawdown (ALL):** ${_fmt(g('max_drawdown_dollars'))} ({_fmt(g('max_drawdown_pct'), pct=True)} — max % drop from peak equity using SL-adjusted P/L)
+- **Sharpe (Annualized, ALL):** {_fmt(g('sharpe_annualized'))}
+- **Sortino (Annualized, ALL):** {_fmt(g('sortino_annualized'))}
+- **Calmar Ratio (ALL):** {_fmt(g('calmar_ratio'))}
+- **Volatility-Adjusted Return (ALL):** {_fmt(g('volatility_adjusted_return'))}
+- **Total Trades (ALL):** {int(g('num_trades', 0))}
+- **Max Consecutive Wins:** {int(g('max_consecutive_wins', 0))}
+- **Max Consecutive Losses:** {int(g('max_consecutive_losses', 0))}
+- **Sample Size Adequate:** {g('sample_size_adequate', False)}
+---
+## RTH Snapshot (09:30–16:00 ET)
+- **Net Profit (RTH):** ${_fmt(g('RTH_net_profit'))}
+- **Win Rate (RTH):** {_fmt(g('RTH_win_rate_pct'), pct=True)}
+- **Profit Factor (RTH):** {_fmt(g('RTH_profit_factor'))}
+- **Max Drawdown (RTH):** ${_fmt(g('RTH_max_drawdown_dollars'))} ({_fmt(g('RTH_max_drawdown_pct'), pct=True)})
+- **Sharpe (Annualized, RTH):** {_fmt(g('RTH_sharpe_annualized'))}
+- **Total Trades (RTH):** {int(g('num_trades_rth', 0))}
+---
+## Efficiency Metrics
+### Holding Time Analysis
+- **Average Hold Time (Overall):** {_fmt(g('avg_hold_mins'))} minutes
+- **Average Hold Time (Winners):** {_fmt(g('avg_hold_winners_mins'))} minutes
+- **Average Hold Time (Losers):** {_fmt(g('avg_hold_losers_mins'))} minutes
+- **Median Hold Time:** {_fmt(g('median_hold_mins'))} minutes
+- **Longest Hold Time:** {_fmt(g('longest_hold_mins'))} minutes
+- **Shortest Hold Time:** {_fmt(g('shortest_hold_mins'))} minutes
+- **Hold Time Distribution:**
+  - 0–15 min: {int(g('hold_distribution').get('0-15', 0))} trades
+  - 15–60 min: {int(g('hold_distribution').get('15-60', 0))} trades
+  - 60–180 min: {int(g('hold_distribution').get('60-180', 0))} trades
+  - >180 min: {int(g('hold_distribution').get('>180', 0))} trades
+### Trade Frequency by Session
+- **Trade Counts by Session:**
+  - PRE: {int(g('session_counts').get('PRE', 0))} trades
+  - OPEN: {int(g('session_counts').get('OPEN', 0))} trades
+  - LUNCH: {int(g('session_counts').get('LUNCH', 0))} trades
+  - CLOSING: {int(g('session_counts').get('CLOSING', 0))} trades
+  - OTHER: {int(g('session_counts').get('OTHER', 0))} trades
+- **Expectancy by Session:**
+  - PRE: ${_fmt(g('session_expectancy').get('PRE', np.nan))}
+  - OPEN: ${_fmt(g('session_expectancy').get('OPEN', np.nan))}
+  - LUNCH: ${_fmt(g('session_expectancy').get('LUNCH', np.nan))}
+  - CLOSING: ${_fmt(g('session_expectancy').get('CLOSING', np.nan))}
+  - OTHER: ${_fmt(g('session_expectancy').get('OTHER', np.nan))}
+- **Points per Contract by Session:**
+  - PRE: {_fmt(g('session_points_per_contract').get('PRE', np.nan))}
+  - OPEN: {_fmt(g('session_points_per_contract').get('OPEN', np.nan))}
+  - LUNCH: {_fmt(g('session_points_per_contract').get('LUNCH', np.nan))}
+  - CLOSING: {_fmt(g('session_points_per_contract').get('CLOSING', np.nan))}
+  - OTHER: {_fmt(g('session_points_per_contract').get('OTHER', np.nan))}
+### Day of Week Performance
+- **Monday:**
+  - Win Rate: {_fmt(g('dow_metrics').get('Monday', {}).get('win_rate', np.nan), pct=True)}
+  - Net P/L: ${_fmt(g('dow_metrics').get('Monday', {}).get('net_pl', np.nan))}
+  - Expectancy: ${_fmt(g('dow_metrics').get('Monday', {}).get('expectancy', np.nan))}
+- **Tuesday:**
+  - Win Rate: {_fmt(g('dow_metrics').get('Tuesday', {}).get('win_rate', np.nan), pct=True)}
+  - Net P/L: ${_fmt(g('dow_metrics').get('Tuesday', {}).get('net_pl', np.nan))}
+  - Expectancy: ${_fmt(g('dow_metrics').get('Tuesday', {}).get('expectancy', np.nan))}
+- **Wednesday:**
+  - Win Rate: {_fmt(g('dow_metrics').get('Wednesday', {}).get('win_rate', np.nan), pct=True)}
+  - Net P/L: ${_fmt(g('dow_metrics').get('Wednesday', {}).get('net_pl', np.nan))}
+  - Expectancy: ${_fmt(g('dow_metrics').get('Wednesday', {}).get('expectancy', np.nan))}
+- **Thursday:**
+  - Win Rate: {_fmt(g('dow_metrics').get('Thursday', {}).get('win_rate', np.nan), pct=True)}
+  - Net P/L: ${_fmt(g('dow_metrics').get('Thursday', {}).get('net_pl', np.nan))}
+  - Expectancy: ${_fmt(g('dow_metrics').get('Thursday', {}).get('expectancy', np.nan))}
+- **Friday:**
+  - Win Rate: {_fmt(g('dow_metrics').get('Friday', {}).get('win_rate', np.nan), pct=True)}
+  - Net P/L: ${_fmt(g('dow_metrics').get('Friday', {}).get('net_pl', np.nan))}
+  - Expectancy: ${_fmt(g('dow_metrics').get('Friday', {}).get('expectancy', np.nan))}
+---
+## Effectiveness Metrics
+### Expectancy by Trade Length
+- 0–15 min: ${_fmt(g('expectancy_by_hold').get('0-15', np.nan))}
+- 15–60 min: ${_fmt(g('expectancy_by_hold').get('15-60', np.nan))}
+- 60–180 min: ${_fmt(g('expectancy_by_hold').get('60-180', np.nan))}
+- >180 min: ${_fmt(g('expectancy_by_hold').get('>180', np.nan))}
+### Capital Efficiency
+- **Net Profit per Trade-Minute of Capital:** {_fmt(g('capital_efficiency'), 4)} per dollar-minute
+### Concentration Risk
+- **% of Net Profit from Top 10% of Trades:** {_fmt(g('concentration_risk_pct'), pct=True)}
+### Trade Outcome by Day Part
+- **Early (09:30–11:30):** ${_fmt(g('day_part_expectancy').get('EARLY', np.nan))}
+- **Mid (11:30–14:00):** {_fmt(g('day_part_expectancy').get('MID', np.nan))}
+- **Late (14:00–16:00):** {_fmt(g('day_part_expectancy').get('LATE', np.nan))}
+- **Other:** {_fmt(g('day_part_expectancy').get('OTHER', np.nan))}
+### Performance by Exit Reason
+- **Target:**
+  - Count: {int(g('exit_reason_metrics').get('Target', {}).get('count', 0))}
+  - Win Rate: {_fmt(g('exit_reason_metrics').get('Target', {}).get('win_rate', np.nan), pct=True)}
+  - Expectancy: ${_fmt(g('exit_reason_metrics').get('Target', {}).get('expectancy', np.nan))}
+- **Stop:**
+  - Count: {int(g('exit_reason_metrics').get('Stop', {}).get('count', 0))}
+  - Win Rate: {_fmt(g('exit_reason_metrics').get('Stop', {}).get('win_rate', np.nan), pct=True)}
+  - Expectancy: ${_fmt(g('exit_reason_metrics').get('Stop', {}).get('expectancy', np.nan))}
+- **Time:**
+  - Count: {int(g('exit_reason_metrics').get('Time', {}).get('count', 0))}
+  - Win Rate: {_fmt(g('exit_reason_metrics').get('Time', {}).get('win_rate', np.nan), pct=True)}
+  - Expectancy: ${_fmt(g('exit_reason_metrics').get('Time', {}).get('expectancy', np.nan))}
+- **Manual:**
+  - Count: {int(g('exit_reason_metrics').get('Manual', {}).get('count', 0))}
+  - Win Rate: {_fmt(g('exit_reason_metrics').get('Manual', {}).get('win_rate', np.nan), pct=True)}
+  - Expectancy: ${_fmt(g('exit_reason_metrics').get('Manual', {}).get('expectancy', np.nan))}
+### Volatility-Based Performance
+- **Low Volatility:** ${_fmt(g('volatility_expectancy').get('Low', np.nan))}
+- **Medium Volatility:** {_fmt(g('volatility_expectancy').get('Medium', np.nan))}
+- **High Volatility:** {_fmt(g('volatility_expectancy').get('High', np.nan))}
+### Commission Impact
+- **% of Gross Profit Lost to Commissions:** {_fmt(g('commission_impact_pct'), pct=True)}
+---
+## Performance by Direction
+- **Long Trades:**
+  - Number of Trades: {int(g('num_trades_long', 0))}
+  - Win Rate: {_fmt(g('win_rate_long_pct'), pct=True)}
+  - Net Profit: ${_fmt(g('net_profit_long'))}
+  - Average Win: {_fmt(g('avg_win_long'))}
+  - Average Loss: {_fmt(g('avg_loss_long'))}
+  - Expectancy: {_fmt(g('expectancy_long'))}
+  - Average Hold Time: {_fmt(g('avg_hold_long_mins'))} minutes
+  - Median Hold Time: {_fmt(g('median_hold_long_mins'))} minutes
+  - Points per Contract: {_fmt(g('points_long'))}
+- **Short Trades:**
+  - Number of Trades: {int(g('num_trades_short', 0))}
+  - Win Rate: {_fmt(g('win_rate_short_pct'), pct=True)}
+  - Net Profit: ${_fmt(g('net_profit_short'))}
+  - Average Win: {_fmt(g('avg_win_short'))}
+  - Average Loss: ${_fmt(g('avg_loss_short'))}
+  - Expectancy: ${_fmt(g('expectancy_short'))}
+  - Average Hold Time: {_fmt(g('avg_hold_short_mins'))} minutes
+  - Median Hold Time: {_fmt(g('median_hold_short_mins'))} minutes
+  - Points per Contract: {_fmt(g('points_short'))}
+---
+## Monthly and Quarterly Performance
+### Monthly Breakdown
+{monthly_metrics_str}
+### Quarterly Breakdown
+{quarterly_metrics_str}
+---
+## Performance Details — ALL
+- **Average Win:** {_fmt(g('avg_win_dollars'))}
+- **Average Loss:** {_fmt(g('avg_loss_dollars'))}
+- **Expectancy per Trade:** {_fmt(g('expectancy_per_trade_dollars'))}
+- **Largest Win:** {_fmt(g('largest_winning_trade'))}
+- **Largest Loss:** {_fmt(g('largest_losing_trade'))}
+- **Recovery Factor:** {_fmt(g('recovery_factor'))}
+---
+## Charts
+![Equity Curve (ALL)](equity_curve_all.png)
+![Drawdown Curve (ALL)](drawdown_curve_all.png)
+![Trade P/L Distribution (ALL)](pl_histogram_all.png)
+![Hold Time Distribution (ALL)](hold_time_histogram_all.png)
+![Points Captured Distribution (ALL)](points_histogram_all.png)
+*Report generated by DataAnalyzer v{cfg.version}*
+"""
+    with open(os.path.join(outdir, "analytics.md"), "w", encoding="utf-8") as f:
+        f.write(md)
+
+# =========================
 # Main runner
 # =========================
 
@@ -693,6 +895,8 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
         symbols = s.str.extract(pat, expand=False).dropna().map(lambda x: f"/{x}").map(normalize_symbol).unique().tolist()
     if not symbols:
         symbols = ['/MES']
+    global _volatility_warning_emitted
+    _volatility_warning_emitted = False  # Reset warning flag for each CSV
     results = []
     for instr in symbols:
         trades_all, trades_rth, metrics, outdir = run_backtest_for_instrument(raw, instr, cfg, csv_stem)
@@ -731,7 +935,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.3.4",
+        version="1.3.5",
     )
     all_metrics = []
     for csv_path in csv_paths:
