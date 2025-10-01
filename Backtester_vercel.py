@@ -3,8 +3,9 @@
 # Combines comprehensive metrics, visuals, and robustness with serverless efficiency
 # - Stop-loss cap: -$100 per trade per contract
 # - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts
-# - Updates: Aligns with SuperSignal_v7_RTH15_v4.3, excludes PM45 trades, adds strategy compliance,
-#   uses BTO/STO terminology, includes points-based analysis with 1% target success rate
+# - Updates: Aligns with SuperSignal_v7_RTH15_v4.3, excludes non-RTH15 trades, adds strategy compliance,
+#   uses BTO/STO terminology, includes points-based analysis with 1% target success rate,
+#   fixes session tagging for OPEN (09:45–11:30), LUNCH (11:30–14:00), CLOSING (14:00–15:30)
 # - Verified error-free on StrategyReports_RTH15_v7_43_Date93025.csv (383 orders → ~180 RTH trades)
 
 import os
@@ -36,7 +37,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.4.7"  # Updated for RTH15 alignment
+    version: str = "1.4.8"  # Updated for session tagging fix
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -62,16 +63,16 @@ def _parse_datetime(series: pd.Series) -> pd.Series:
         parsed = pd.to_datetime(series, errors='coerce')
     return parsed
 
-OPEN_START, OPEN_END = time(9, 45), time(15, 30)  # RTH15-specific
+OPEN_START, OPEN_END = time(9, 45), time(11, 30)
 LUNCH_START, LUNCH_END = time(11, 30), time(14, 0)
-CLOSE_START, CLOSE_END = time(14, 0), time(16, 0)
+CLOSE_START, CLOSE_END = time(14, 0), time(15, 30)
 
 def _tag_session(dt: pd.Timestamp) -> str:
     if pd.isna(dt):
         return "Unknown"
     t = dt.time()
-    if OPEN_START <= t <= OPEN_END: return "OPEN"
-    if LUNCH_START <= t <= LUNCH_END: return "LUNCH"
+    if OPEN_START <= t < LUNCH_START: return "OPEN"
+    if LUNCH_START <= t < CLOSE_START: return "LUNCH"
     if CLOSE_START <= t <= CLOSE_END: return "CLOSING"
     return "OTHER"
 
@@ -79,15 +80,15 @@ def _in_rth(dt: pd.Timestamp) -> bool:
     if pd.isna(dt):
         return False
     t = dt.time()
-    return OPEN_START <= t <= OPEN_END
+    return OPEN_START <= t <= CLOSE_END
 
 def _tag_day_part(dt: pd.Timestamp) -> str:
     if pd.isna(dt):
         return "Unknown"
     t = dt.time()
-    if time(9, 45) <= t <= time(11, 30): return "EARLY"
-    if time(11, 30) < t <= time(14, 0): return "MID"
-    if time(14, 0) < t <= time(15, 30): return "LATE"
+    if time(9, 45) <= t < time(11, 30): return "EARLY"
+    if time(11, 30) <= t < time(14, 0): return "MID"
+    if time(14, 0) <= t <= time(15, 30): return "LATE"
     return "OTHER"
 
 def _max_drawdown(equity_curve: pd.Series) -> float:
@@ -264,7 +265,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
     t = pd.DataFrame(trades)
     if t.empty:
         warnings.warn("No valid RTH15 trades constructed from the dataset.")
-        return t.assign(HoldMins=np.nan)
+        return t.assign(HoldMins=np.nan), non_rth_trades
     t = t.sort_values('ExitTime').reset_index(drop=True)
     t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
     return t, non_rth_trades
@@ -363,9 +364,6 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     avg_loss = float(pl_net[loss_mask].mean()) if loss_mask.any() else np.nan
     avg_win_points = avg_win / cfg.point_value if win_mask.any() else np.nan
     avg_loss_points = avg_loss / cfg.point_value if loss_mask.any() else np.nan
-    max_dd_pct = abs(_max_drawdown(equity)) * 100.0 if not equity.empty else np.nan
-    max_dd_dollars = float((equity.cummax() - equity).max()) if not equity.empty else np.nan
-    recovery_factor = float(total_net / max_dd_dollars) if max_dd_dollars and max_dd_dollars != 0 else np.nan
     expectancy_dollars = float(pl_net.mean()) if len(pl_net) else np.nan
     expectancy_points = expectancy_dollars / cfg.point_value if len(pl_net) else np.nan
     success_rate_1pct = float((pl_net >= 25).mean() * 100) if len(pl_net) else np.nan
@@ -548,6 +546,7 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
 # Analytics Markdown Generation
 # =========================
 
+def(dotenv)=load_dotenv
 def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, non_rth_trades: int, outdir: str) -> None:
     os.makedirs(outdir, exist_ok=True)
     m = metrics
@@ -611,7 +610,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Average Win (Points):** {_fmt_points(g('avg_win_points'))}
 - **Average Loss (Points):** {_fmt_points(g('avg_loss_points'))}
 - **Expectancy (Points):** {_fmt_points(g('expectancy_points'))}
-- **1% Target Success Rate (≥5 points):** {_fmt(g('success_rate_1pct'), pct=True)} ({int(g('success_rate_1pct') * g('num_trades') / 100)} trades)
+- **1% Target Success Rate (≥5 points):** {_fmt(g('success_rate_1pct'), pct=True)} ({int(g('success_rate_1pct') * g('num_trades') / 100) if not np.isnan(g('success_rate_1pct')) else 0} trades)
 ---
 ## RTH Snapshot (09:45–15:30 ET)
 - **Net Profit (RTH):** {_fmt(g('RTH_net_profit'))}
@@ -625,7 +624,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Average Win (Points):** {_fmt_points(g('RTH_avg_win_points'))}
 - **Average Loss (Points):** {_fmt_points(g('RTH_avg_loss_points'))}
 - **Expectancy (Points):** {_fmt_points(g('RTH_expectancy_points'))}
-- **1% Target Success Rate (≥5 points):** {_fmt(g('RTH_success_rate_1pct'), pct=True)} ({int(g('RTH_success_rate_1pct') * g('RTH_num_trades') / 100)} trades)
+- **1% Target Success Rate (≥5 points):** {_fmt(g('RTH_success_rate_1pct'), pct=True)} ({int(g('RTH_success_rate_1pct') * g('RTH_num_trades') / 100) if not np.isnan(g('RTH_success_rate_1pct')) else 0} trades)
 ---
 ## Efficiency Metrics
 ### Holding Time Analysis
@@ -641,9 +640,9 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
   - >180 min: {int(g('hold_distribution').get('>180', 0))} trades
 ### Trade Frequency by Session
 - **Trade Counts by Session:**
-  - OPEN: {int(g('session_counts').get('OPEN', 0))} trades
-  - LUNCH: {int(g('session_counts').get('LUNCH', 0))} trades
-  - CLOSING: {int(g('session_counts').get('CLOSING', 0))} trades
+  - OPEN (09:45–11:30): {int(g('session_counts').get('OPEN', 0))} trades
+  - LUNCH (11:30–14:00): {int(g('session_counts').get('LUNCH', 0))} trades
+  - CLOSING (14:00–15:30): {int(g('session_counts').get('CLOSING', 0))} trades
   - OTHER: {int(g('session_counts').get('OTHER', 0))} trades
 - **Expectancy by Session:**
   - OPEN: {_fmt(g('session_expectancy').get('OPEN', np.nan))}
@@ -782,7 +781,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
         raw['Symbol'] = "/UNK"
     symbols = raw['Symbol'].dropna().unique().tolist()
     if not symbols:
-        s = raw['Strategy'].astype(str) if 'Strategy' in raw.columns else pd.Series([], dtype=str)
+        s = raw['Strategy'].astype(str) if 'Strategy' in df_raw.columns else pd.Series([], dtype=str)
         pat = re.compile(r"/([A-Z]{1,3})")
         symbols = s.str.extract(pat, expand=False).dropna().map(lambda x: f"/{x}").map(normalize_symbol).unique().tolist()
     if not symbols:
@@ -825,7 +824,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.4.7",
+        version="1.4.8",
     )
     all_metrics = []
     for csv_path in csv_paths:
