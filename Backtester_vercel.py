@@ -6,7 +6,7 @@
 # - Updates: Aligns with SuperSignal_v7_RTH15_v4.3, excludes non-RTH15 trades, uses BTO/STO terminology,
 #   includes points-based analysis with 1% target success rate, fixes session tagging,
 #   adds stop-loss analysis, fixes NameError for max_dd_pct, fixes stop-loss detection,
-#   fixes SyntaxError in __main__, fixes NameError for run_backtest_for_instrument
+#   fixes NameError for run_backtest_for_instrument, adds algo input tracking
 # - Verified error-free on SuperSignal_RTH15_v7_v43_MES_100125.csv (382 orders → 191 RTH trades)
 
 import os
@@ -38,7 +38,12 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.4.14"  # Updated for NameError fix
+    version: str = "1.5.0"  # Updated for NameError and stop-loss fixes
+    algo_params: dict = None  # Store algo inputs (e.g., ATRFactor_Fixed)
+
+    def __post_init__(self):
+        if self.algo_params is None:
+            self.algo_params = {"ATRFactor_Fixed": 2.2, "StopLossCap": 100.0}
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -106,11 +111,17 @@ def _profit_factor(pl: pd.Series) -> float:
     return float(gp / gl)
 
 def _exit_reason(text: str) -> str:
-    s = str(text).upper()
-    if any(w in s for w in ["TARGET", "TGT", "TP", "PROFIT"]): return "Target"
-    if any(w in s for w in ["STC STOP", "BTC STOP", "STOP ", "SL ", "STOPPED"]): return "Stop"
-    if any(w in s for w in ["TIME", "TIME EXIT", "TIMED", "TIMEOUT", "DAILY"]): return "Time"
-    if any(w in s for w in ["MANUAL", "FLATTEN", "MKT CLOSE", "DISCRETIONARY", "OPPOSING"]): return "Other"
+    if not text or pd.isna(text):
+        return "Close"
+    s = str(text).upper().strip()
+    if any(w in s for w in ["TARGET", "TGT", "TP", "PROFIT"]):
+        return "Target"
+    if any(w in s for w in ["STC STOP", "BTC STOP", "STOP ", "SL ", "STOPPED"]):
+        return "Stop"
+    if any(w in s for w in ["TIME", "TIME EXIT", "TIMED", "TIMEOUT", "DAILY"]):
+        return "Time"
+    if any(w in s for w in ["MANUAL", "FLATTEN", "MKT CLOSE", "DISCRETIONARY", "OPPOSING"]):
+        return "Other"
     return "Close"
 
 ROOT_RE = re.compile(r"^/?([A-Za-z]{1,3})(?:[FGHJKMNQUVXZ]\d{1,2})?$")
@@ -209,8 +220,8 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> Tuple[pd.DataFrame, 
     while i < len(df) - 1:
         entry = df.iloc[i]
         exit_ = df.iloc[i + 1]
-        side_entry = str(entry['Side']).upper()
-        side_exit = str(exit_['Side']).upper()
+        side_entry = str(entry['Side']).upper().strip()
+        side_exit = str(exit_['Side']).upper().strip()
         if re.search(OPEN_RX, side_entry) and re.search(CLOSE_RX, side_exit):
             if exit_['Date'] < entry['Date']:
                 warnings.warn(f"Invalid trade pair: Exit time ({exit_['Date']}) before entry time ({entry['Date']}) at index {i}. Skipping.")
@@ -234,6 +245,9 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> Tuple[pd.DataFrame, 
             trade_pl = _safe_num(exit_.get('TradePL'))
             commission = commission_rt * qty_abs
             net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
+            exit_reason = _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order'))
+            if exit_reason == "Stop":
+                print(f"Debug: Stop detected - Side: {exit_.get('Side')}, Type: {exit_.get('Type')}, Order: {exit_.get('Order')}")
             trades.append({
                 'Id': entry.get('Id', np.nan),
                 'EntryTime': entry['Date'],
@@ -252,7 +266,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> Tuple[pd.DataFrame, 
                 'Symbol': entry.get('Symbol', ''),
                 'EntrySide': str(entry.get('Side', '')),
                 'ExitSide': str(exit_.get('Side', '')),
-                'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order')),
+                'ExitReason': exit_reason,
                 'Direction': direction,
             })
             i += 2
@@ -301,6 +315,7 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
             "timeframe": cfg.timeframe,
             "initial_capital": cfg.initial_capital,
             "point_value": cfg.point_value,
+            "algo_params": cfg.algo_params,
             "num_trades": 0,
             "non_rth_trades": non_rth_trades,
             "net_profit": np.nan,
@@ -475,6 +490,7 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
         "timeframe": cfg.timeframe,
         "initial_capital": cfg.initial_capital,
         "point_value": cfg.point_value,
+        "algo_params": cfg.algo_params,
         "num_trades": int(len(df)),
         "non_rth_trades": non_rth_trades,
         "net_profit": total_net,
@@ -626,6 +642,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
     instrument = g('instrument', '/MES')
     total_trades_attempted = len(trades_all) + non_rth_trades
     non_rth_pct = (non_rth_trades / total_trades_attempted * 100) if total_trades_attempted > 0 else 0.0
+    algo_params_str = "\n".join([f"- {k}: {v}" for k, v in g('algo_params', {}).items()])
     md = f"""
 # Strategy Analysis Report
 **Strategy:** {g('strategy_name')}
@@ -634,7 +651,9 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 **Timeframe:** {g('timeframe')}
 **Run Date:** {datetime.now().strftime('%Y-%m-%d')}
 **Session Basis:** New York time (ET)
-**P/L Basis:** All KPIs computed on **SL-adjusted net P/L** (cap −$100 per trade including commissions).
+**P/L Basis:** All KPIs computed on **SL-adjusted net P/L** (cap −${g('algo_params', {}).get('StopLossCap', 100.0):.2f} per trade including commissions).
+**Algorithm Parameters:**
+{algo_params_str}
 **Trades:** ALL = {int(g('num_trades_all', 0))} | RTH = {int(g('RTH_num_trades', 0))} | Non-RTH15 Excluded = {non_rth_trades} ({non_rth_pct:.2f}%)
 
 *Note: BTO = Buy to Open (Long), STO = Sell to Open (Short). Analysis focuses on RTH15 trades (09:45–15:30 ET).*
@@ -642,7 +661,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 ## Strategy Compliance
 - **Trades within RTH15 Window (09:45–15:30 ET):** {(1 - non_rth_pct/100)*100:.2f}% ({int(g('num_trades_all', 0))} trades)
 - **Non-RTH15 Trades Excluded:** {non_rth_trades} trades ({non_rth_pct:.2f}%)
-- **Trades with Raw Loss > $100 (before cap):** {_fmt(g('raw_loss_exceeds_100_pct'), pct=True)} ({g('raw_loss_exceeds_100_count')} trades)
+- **Trades with Raw Loss > ${g('algo_params', {}).get('StopLossCap', 100.0):.2f} (before cap):** {_fmt(g('raw_loss_exceeds_100_pct'), pct=True)} ({g('raw_loss_exceeds_100_count')} trades)
 ---
 ## Key Performance Indicators — ALL Sessions
 - **Net Profit (ALL):** {_fmt(g('net_profit'))}
@@ -661,8 +680,8 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 ---
 ## Stop-Loss Analysis — ALL
 - **Total Stops Hit:** {g('total_stops')} trades
-- **Stops < 20 Points (< $100):** {g('stops_lt_20_points')} trades ({_fmt(g('stops_lt_20_points') / g('total_stops') * 100 if g('total_stops') > 0 else 0, pct=True)})
-- **Stops = 20 Points (= $100):** {g('stops_eq_20_points')} trades ({_fmt(g('stops_eq_20_points') / g('total_stops') * 100 if g('total_stops') > 0 else 0, pct=True)})
+- **Stops < 20 Points (< ${g('algo_params', {}).get('StopLossCap', 100.0):.2f}):** {g('stops_lt_20_points')} trades ({_fmt(g('stops_lt_20_points') / g('total_stops') * 100 if g('total_stops') > 0 else 0, pct=True)})
+- **Stops = 20 Points (= ${g('algo_params', {}).get('StopLossCap', 100.0):.2f}):** {g('stops_eq_20_points')} trades ({_fmt(g('stops_eq_20_points') / g('total_stops') * 100 if g('total_stops') > 0 else 0, pct=True)})
 - **Average Stop Loss (Points):** {_fmt_points(g('avg_stop_loss_points'))}
 - **BTO Stops:**
   - Total: {g('total_stops_bto')} trades
@@ -691,8 +710,8 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 ---
 ## Stop-Loss Analysis — RTH
 - **Total Stops Hit:** {g('RTH_total_stops')} trades
-- **Stops < 20 Points (< $100):** {g('RTH_stops_lt_20_points')} trades ({_fmt(g('RTH_stops_lt_20_points') / g('RTH_total_stops') * 100 if g('RTH_total_stops') > 0 else 0, pct=True)})
-- **Stops = 20 Points (= $100):** {g('RTH_stops_eq_20_points')} trades ({_fmt(g('RTH_stops_eq_20_points') / g('RTH_total_stops') * 100 if g('RTH_total_stops') > 0 else 0, pct=True)})
+- **Stops < 20 Points (< ${g('algo_params', {}).get('StopLossCap', 100.0):.2f}):** {g('RTH_stops_lt_20_points')} trades ({_fmt(g('RTH_stops_lt_20_points') / g('RTH_total_stops') * 100 if g('RTH_total_stops') > 0 else 0, pct=True)})
+- **Stops = 20 Points (= ${g('algo_params', {}).get('StopLossCap', 100.0):.2f}):** {g('RTH_stops_eq_20_points')} trades ({_fmt(g('RTH_stops_eq_20_points') / g('RTH_total_stops') * 100 if g('RTH_total_stops') > 0 else 0, pct=True)})
 - **Average Stop Loss (Points):** {_fmt_points(g('RTH_avg_stop_loss_points'))}
 - **BTO Stops:**
   - Total: {g('RTH_total_stops_bto')} trades
@@ -811,6 +830,8 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 # =========================
 
 def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str], cfg: BacktestConfig, csv_stem: str):
+    if not callable(run_backtest_for_instrument):
+        raise NameError("run_backtest_for_instrument is not defined")
     strategy_label = df_raw['BaseStrategy'].dropna().iloc[0] if 'BaseStrategy' in df_raw.columns and len(df_raw.dropna(subset=['BaseStrategy'])) else (cfg.strategy_name or 'Unknown')
     instr = normalize_symbol(instrument or '/UNK')
     cfg.strategy_name = strategy_label
@@ -864,7 +885,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
         raw['Symbol'] = "/UNK"
     symbols = raw['Symbol'].dropna().unique().tolist()
     if not symbols:
-        s = raw['Strategy'].astype(str) if 'Strategy' in df_raw.columns else pd.Series([], dtype=str)
+        s = raw['Strategy'].astype(str) if 'Strategy' in raw.columns else pd.Series([], dtype=str)
         pat = re.compile(r"/([A-Z]{1,3})")
         symbols = s.str.extract(pat, expand=False).dropna().map(lambda x: f"/{x}").map(normalize_symbol).unique().tolist()
     if not symbols:
@@ -907,7 +928,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.4.14",
+        version="1.5.0",
     )
     all_metrics = []
     for csv_path in csv_paths:
