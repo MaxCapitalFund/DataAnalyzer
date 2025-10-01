@@ -927,4 +927,3 @@ if __name__ == "__main__":
             m = r["metrics"]
             m["csv"] = str(Path(csv_path).name)
             all_metrics.append(m)
-```
