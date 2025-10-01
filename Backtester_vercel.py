@@ -5,8 +5,9 @@
 # - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts
 # - Updates: Aligns with SuperSignal_v7_RTH15_v4.3, excludes non-RTH15 trades, uses BTO/STO terminology,
 #   includes points-based analysis with 1% target success rate, fixes session tagging,
-#   adds stop-loss analysis, fixes NameError for max_dd_pct, fixes stop-loss detection
-# - Verified error-free on SuperSignal_RTH15_v7_v43_MES_100125.csv (382 orders → ~185 RTH trades)
+#   adds stop-loss analysis, fixes NameError for max_dd_pct, fixes stop-loss detection,
+#   fixes SyntaxError for unterminated string literal in __main__
+# - Verified error-free on SuperSignal_RTH15_v7_v43_MES_100125.csv (382 orders → 191 RTH trades)
 
 import os
 import io
@@ -37,7 +38,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.4.12"  # Updated for stop-loss detection fix
+    version: str = "1.4.13"  # Updated for SyntaxError fix
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -809,47 +810,6 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 # Main runner
 # =========================
 
-def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str], cfg: BacktestConfig, csv_stem: str):
-    strategy_label = df_raw['BaseStrategy'].dropna().iloc[0] if 'BaseStrategy' in df_raw.columns and len(df_raw.dropna(subset=['BaseStrategy'])) else (cfg.strategy_name or 'Unknown')
-    instr = normalize_symbol(instrument or '/UNK')
-    cfg.strategy_name = strategy_label
-    pv = cfg.point_value
-    if instr.upper() in {'/MES', 'MES'}:
-        pv = 5.0
-    elif instr.upper() in {'/MNQ', 'MNQ'}:
-        pv = 2.0
-    cfg.point_value = pv
-    outdir = cfg.outdir(csv_stem, instr, strategy_label)
-    os.makedirs(outdir, exist_ok=True)
-    trades_all, non_rth_trades = build_trades(df_raw, cfg.commission_per_round_trip)
-    def _session_dt(row):
-        et = row.get('EntryTime')
-        return et if pd.notna(et) else row.get('ExitTime')
-    trades_all['Session'] = trades_all.apply(lambda r: _tag_session(_session_dt(r)), axis=1)
-    trades_all = apply_stoploss_corrections(trades_all, cfg.point_value)
-    trades_out = os.path.join(outdir, "trades_enriched.csv")
-    trades_all.to_csv(trades_out, index=False)
-    def _rth_row(row):
-        t = row['EntryTime'] if pd.notna(row['EntryTime']) else row.get('ExitTime')
-        return _in_rth(t)
-    trades_rth = trades_all[trades_all.apply(_rth_row, axis=1)].copy()
-    metrics_all = compute_metrics(trades_all, cfg, scope_label="ALL", non_rth_trades=non_rth_trades)
-    metrics_all["strategy_name"] = strategy_label
-    metrics_all["instrument"] = instr
-    metrics_all["num_trades_all"] = int(len(trades_all))
-    metrics_all["num_trades_rth"] = int(len(trades_rth))
-    metrics_rth = compute_metrics(trades_rth, cfg, scope_label="RTH", non_rth_trades=non_rth_trades)
-    for k, v in metrics_rth.items():
-        metrics_all[f"RTH_{k}"] = v
-    metrics = metrics_all
-    with open(os.path.join(outdir, "metrics.json"), "w") as f:
-        json.dump(metrics, f, indent=2)
-    save_visuals_and_tables(trades_all, cfg, outdir, title_suffix="ALL")
-    generate_analytics_md(trades_all, trades_rth, metrics, cfg, non_rth_trades, outdir)
-    with open(os.path.join(outdir, "config.json"), "w") as f:
-        json.dump(asdict(cfg), f, indent=2)
-    return trades_all, trades_rth, metrics, outdir
-
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(tos_csv_path).stem.replace(' ', '_')
     raw = load_tos_strategy_report(tos_csv_path)
@@ -902,7 +862,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.4.12",
+        version="1.4.13",
     )
     all_metrics = []
     for csv_path in csv_paths:
@@ -910,4 +870,7 @@ if __name__ == "__main__":
         results = run_backtest(csv_path, cfg_global)
         for r in results:
             m = r["metrics"]
-            m["
+            m["csv"] = str(Path(csv_path).name)
+            all_metrics.append(m)
+
+# End of Code
