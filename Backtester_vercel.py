@@ -6,6 +6,7 @@ import os
 import io
 import re
 import json
+import warnings
 from dataclasses import dataclass, asdict
 from datetime import datetime, time
 from pathlib import Path
@@ -30,7 +31,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.3.2"  # Updated version for new metrics
+    version: str = "1.3.3"  # Updated for robustness fixes and new metrics
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -197,6 +198,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
         return pd.to_numeric(x, errors='coerce')
     OPEN_RX = r"\b(?:BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN|STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT|OPEN)\b"
     CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)\b"
+    unpaired_count = 0
     i = 0
     while i < len(df) - 1:
         entry = df.iloc[i]
@@ -204,6 +206,11 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
         side_entry = str(entry['Side']).upper()
         side_exit = str(exit_['Side']).upper()
         if re.search(OPEN_RX, side_entry) and re.search(CLOSE_RX, side_exit):
+            if exit_['Date'] < entry['Date']:
+                warnings.warn(f"Invalid trade pair: Exit time ({exit_['Date']}) before entry time ({entry['Date']}) at index {i}. Skipping.")
+                i += 1
+                unpaired_count += 1
+                continue
             entry_qty = _safe_num(entry.get('Qty'))
             qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
             direction = 'Unknown'
@@ -239,9 +246,13 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
             })
             i += 2
         else:
+            unpaired_count += 1
             i += 1
+    if len(df) % 2 != 0 or unpaired_count > 0:
+        warnings.warn(f"Found {unpaired_count} unpaired orders in the dataset. {len(df) - len(trades) * 2} orders were not included in trades.")
     t = pd.DataFrame(trades)
     if t.empty:
+        warnings.warn("No valid trades constructed from the dataset.")
         return t.assign(HoldMins=np.nan)
     t = t.sort_values('ExitTime').reset_index(drop=True)
     t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
@@ -265,6 +276,78 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
 # =========================
 
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str) -> dict:
+    if trades_df.empty:
+        warnings.warn("Empty trades DataFrame. Returning default metrics with NaN values.")
+        return {
+            "scope": scope_label,
+            "strategy_name": cfg.strategy_name,
+            "version": cfg.version,
+            "timeframe": cfg.timeframe,
+            "initial_capital": cfg.initial_capital,
+            "point_value": cfg.point_value,
+            "num_trades": 0,
+            "net_profit": np.nan,
+            "gross_profit": np.nan,
+            "total_return_pct": np.nan,
+            "profit_factor": np.nan,
+            "win_rate_pct": np.nan,
+            "avg_win_dollars": np.nan,
+            "avg_loss_dollars": np.nan,
+            "risk_reward_ratio": np.nan,
+            "win_loss_ratio": np.nan,
+            "breakeven_win_rate": np.nan,
+            "max_consecutive_wins": 0,
+            "max_consecutive_losses": 0,
+            "expectancy_per_trade_dollars": np.nan,
+            "max_drawdown_pct": np.nan,
+            "max_drawdown_dollars": np.nan,
+            "recovery_factor": np.nan,
+            "sharpe_annualized": np.nan,
+            "sortino_annualized": np.nan,
+            "calmar_ratio": np.nan,
+            "volatility_adjusted_return": np.nan,
+            "largest_winning_trade": np.nan,
+            "largest_losing_trade": np.nan,
+            "avg_hold_mins": np.nan,
+            "avg_hold_winners_mins": np.nan,
+            "avg_hold_losers_mins": np.nan,
+            "median_hold_mins": np.nan,
+            "longest_hold_mins": np.nan,
+            "shortest_hold_mins": np.nan,
+            "hold_distribution": {"0-15": 0, "15-60": 0, "60-180": 0, ">180": 0},
+            "session_counts": {"PRE": 0, "OPEN": 0, "LUNCH": 0, "CLOSING": 0, "OTHER": 0},
+            "session_expectancy": {"PRE": np.nan, "OPEN": np.nan, "LUNCH": np.nan, "CLOSING": np.nan, "OTHER": np.nan},
+            "session_points_per_contract": {"PRE": np.nan, "OPEN": np.nan, "LUNCH": np.nan, "CLOSING": np.nan, "OTHER": np.nan},
+            "dow_metrics": {day: {"win_rate": np.nan, "net_pl": np.nan, "expectancy": np.nan} for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']},
+            "expectancy_by_hold": {"0-15": np.nan, "15-60": np.nan, "60-180": np.nan, ">180": np.nan},
+            "capital_efficiency": np.nan,
+            "concentration_risk_pct": np.nan,
+            "day_part_expectancy": {"EARLY": np.nan, "MID": np.nan, "LATE": np.nan, "OTHER": np.nan},
+            "num_trades_long": 0,
+            "win_rate_long_pct": np.nan,
+            "net_profit_long": np.nan,
+            "avg_win_long": np.nan,
+            "avg_loss_long": np.nan,
+            "expectancy_long": np.nan,
+            "avg_hold_long_mins": np.nan,
+            "median_hold_long_mins": np.nan,
+            "points_long": np.nan,
+            "num_trades_short": 0,
+            "win_rate_short_pct": np.nan,
+            "net_profit_short": np.nan,
+            "avg_win_short": np.nan,
+            "avg_loss_short": np.nan,
+            "expectancy_short": np.nan,
+            "avg_hold_short_mins": np.nan,
+            "median_hold_short_mins": np.nan,
+            "points_short": np.nan,
+            "exit_reason_metrics": {reason: {"count": 0, "win_rate": np.nan, "expectancy": np.nan} for reason in ['Target', 'Stop', 'Time', 'Manual']},
+            "volatility_expectancy": {"Low": np.nan, "Medium": np.nan, "High": np.nan},
+            "commission_impact_pct": np.nan,
+            "sample_size_adequate": False,
+            "monthly_metrics": {},
+            "quarterly_metrics": {}
+        }
     df = trades_df.copy()
     if 'AdjustedNetPL' not in df.columns:
         raise RuntimeError("AdjustedNetPL missing; call apply_stoploss_corrections() before compute_metrics().")
@@ -278,28 +361,28 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     loss_mask = pl_net < 0
     avg_win = float(pl_net[win_mask].mean()) if win_mask.any() else np.nan
     avg_loss = float(pl_net[loss_mask].mean()) if loss_mask.any() else np.nan
-    risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss and avg_win else np.nan
+    risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss and avg_win and avg_loss != 0 else np.nan
     num_wins = len(pl_net[win_mask])
     num_losses = len(pl_net[loss_mask])
     win_loss_ratio = num_wins / num_losses if num_losses else np.nan
-    breakeven_win_rate = (1 / (1 + risk_reward_ratio)) * 100 if risk_reward_ratio else np.nan
-    max_dd_pct = abs(_max_drawdown(equity)) * 100.0
-    max_dd_dollars = float((equity.cummax() - equity).max())
-    recovery_factor = float(total_net / max_dd_dollars) if max_dd_dollars else np.nan
+    breakeven_win_rate = (1 / (1 + risk_reward_ratio)) * 100 if risk_reward_ratio and not np.isnan(risk_reward_ratio) else np.nan
+    max_dd_pct = abs(_max_drawdown(equity)) * 100.0 if not equity.empty else np.nan
+    max_dd_dollars = float((equity.cummax() - equity).max()) if not equity.empty else np.nan
+    recovery_factor = float(total_net / max_dd_dollars) if max_dd_dollars and max_dd_dollars != 0 else np.nan
     expectancy_dollars = float(pl_net.mean()) if len(pl_net) else np.nan
     trade_rets = pl_net / cfg.initial_capital if cfg.initial_capital else pd.Series(np.nan, index=pl_net.index)
-    std = trade_rets.std(ddof=1)
+    std = trade_rets.std(ddof=1) if len(trade_rets) > 1 else np.nan
     per_trade_sharpe = float(trade_rets.mean() / std) if std and std > 0 else np.nan
-    first_dt = pd.to_datetime(df['ExitTime']).min()
-    last_dt = pd.to_datetime(df['ExitTime']).max()
+    first_dt = pd.to_datetime(df['ExitTime']).min() if not df['ExitTime'].empty else pd.NaT
+    last_dt = pd.to_datetime(df['ExitTime']).max() if not df['ExitTime'].empty else pd.NaT
     days = max((last_dt - first_dt).days, 1) if pd.notna(first_dt) and pd.notna(last_dt) else 1
     trades_per_year = (len(df) / days * 252.0) if days and days > 0 else np.nan
     sharpe_annualized = float(np.sqrt(trades_per_year) * per_trade_sharpe) if trades_per_year and per_trade_sharpe == per_trade_sharpe else np.nan
     downside_rets = trade_rets[trade_rets < 0]
     downside_std = downside_rets.std(ddof=1) if len(downside_rets) > 1 else np.nan
     sortino_annualized = float(np.sqrt(trades_per_year) * trade_rets.mean() / downside_std) if downside_std and downside_std > 0 else np.nan
-    annualized_return = (total_return_pct / days * 252.0) if days else np.nan
-    calmar_ratio = annualized_return / abs(max_dd_pct) if max_dd_pct else np.nan
+    annualized_return = (total_return_pct / days * 252.0) if days and total_return_pct else np.nan
+    calmar_ratio = annualized_return / abs(max_dd_pct) if max_dd_pct and max_dd_pct != 0 else np.nan
     volatility_adjusted_return = total_return_pct / (std * 100) if std and std > 0 else np.nan
     largest_win = float(pl_net.max()) if len(pl_net) else np.nan
     largest_loss = float(pl_net.min()) if len(pl_net) else np.nan
@@ -384,12 +467,15 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
             'win_rate': float((reason_df['AdjustedNetPL'] > 0).mean() * 100) if len(reason_df) else np.nan,
             'expectancy': float(reason_df['AdjustedNetPL'].mean()) if len(reason_df) else np.nan
         }
-    daily_prices = df.groupby(df['EntryTime'].dt.date)['EntryPrice'].std().fillna(0)
-    vol_mean = daily_prices.mean()
-    vol_std = daily_prices.std()
-    vol_bins = [0, vol_mean - vol_std, vol_mean + vol_std, float('inf')]
+    daily_prices = df.groupby(df['EntryTime'].dt.date)['EntryPrice']
+    daily_vol = daily_prices.std().fillna(0)
+    daily_counts = daily_prices.count()
+    daily_vol = daily_vol[daily_counts >= 2]  # Require at least 2 trades for volatility estimate
+    vol_mean = daily_vol.mean() if not daily_vol.empty else 0
+    vol_std = daily_vol.std() if not daily_vol.empty else 0
+    vol_bins = [0, max(vol_mean - vol_std, 0), vol_mean + vol_std, float('inf')]
     vol_labels = ['Low', 'Medium', 'High']
-    df['VolatilityBin'] = pd.cut(df['EntryTime'].map(lambda x: daily_prices.get(x.date(), 0)), bins=vol_bins, labels=vol_labels, include_lowest=True)
+    df['VolatilityBin'] = pd.cut(df['EntryTime'].map(lambda x: daily_vol.get(x.date(), 0)), bins=vol_bins, labels=vol_labels, include_lowest=True)
     volatility_expectancy = df.groupby('VolatilityBin')['AdjustedNetPL'].mean().reindex(vol_labels).fillna(np.nan).to_dict()
     commission_impact = (df['Commission'].sum() / total_gross * 100) if total_gross > 0 else np.nan
     sample_size_adequate = len(df) >= 30
@@ -421,7 +507,7 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
         "gross_profit": total_gross,
         "total_return_pct": total_return_pct,
         "profit_factor": _profit_factor(pl_net),
-        "win_rate_pct": float((pl_net > 0).mean() * 100.0),
+        "win_rate_pct": float((pl_net > 0).mean() * 100.0) if len(pl_net) else np.nan,
         "avg_win_dollars": avg_win,
         "avg_loss_dollars": avg_loss,
         "risk_reward_ratio": risk_reward_ratio,
@@ -531,8 +617,16 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     plt.savefig(os.path.join(outdir, f"points_histogram_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
     dt = pd.to_datetime(trades_df['ExitTime'], errors='coerce')
-    monthly = pd.DataFrame({'NetPL': trades_df['AdjustedNetPL'].values}, index=dt)
-    monthly = monthly.dropna().resample('ME').sum()
+    monthly = pd.DataFrame({
+        'NetPL': trades_df['AdjustedNetPL'].values,
+        'WinRate': (trades_df['AdjustedNetPL'] > 0).astype(float) * 100,
+        'Expectancy': trades_df['AdjustedNetPL'].values
+    }, index=dt)
+    monthly = monthly.dropna().resample('ME').agg({
+        'NetPL': 'sum',
+        'WinRate': 'mean',
+        'Expectancy': 'mean'
+    })
     monthly['ReturnPct'] = monthly['NetPL'] / cfg.initial_capital * 100.0
     monthly.to_csv(os.path.join(outdir, f"monthly_performance_{title_suffix.lower()}.csv"))
 
@@ -637,7 +731,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Win/Loss Ratio:** {_fmt(g('win_loss_ratio'))}
 - **Risk-Reward Ratio:** {_fmt(g('risk_reward_ratio'))}
 - **Breakeven Win Rate:** {_fmt(g('breakeven_win_rate'), pct=True)}
-- **Max Drawdown (ALL):** ${_fmt(g('max_drawdown_dollars'))} ({_fmt(g('max_drawdown_pct'), pct=True)} — max % drop from peak equity)
+- **Max Drawdown (ALL):** ${_fmt(g('max_drawdown_dollars'))} ({_fmt(g('max_drawdown_pct'), pct=True)} — max % drop from peak equity using SL-adjusted P/L)
 - **Sharpe (Annualized, ALL):** {_fmt(g('sharpe_annualized'))}
 - **Sortino (Annualized, ALL):** {_fmt(g('sortino_annualized'))}
 - **Calmar Ratio (ALL):** {_fmt(g('calmar_ratio'))}
@@ -714,15 +808,15 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - 0–15 min: ${_fmt(g('expectancy_by_hold').get('0-15', np.nan))}
 - 15–60 min: ${_fmt(g('expectancy_by_hold').get('15-60', np.nan))}
 - 60–180 min: ${_fmt(g('expectancy_by_hold').get('60-180', np.nan))}
-- >180 min: {_fmt(g('expectancy_by_hold').get('>180', np.nan))}
+- >180 min: ${_fmt(g('expectancy_by_hold').get('>180', np.nan))}
 ### Capital Efficiency
 - **Net Profit per Trade-Minute of Capital:** {_fmt(g('capital_efficiency'), 4)} per dollar-minute
 ### Concentration Risk
 - **% of Net Profit from Top 10% of Trades:** {_fmt(g('concentration_risk_pct'), pct=True)}
 ### Trade Outcome by Day Part
 - **Early (09:30–11:30):** ${_fmt(g('day_part_expectancy').get('EARLY', np.nan))}
-- **Mid (11:30–14:00):** {_fmt(g('day_part_expectancy').get('MID', np.nan))}
-- **Late (14:00–16:00):** {_fmt(g('day_part_expectancy').get('LATE', np.nan))}
+- **Mid (11:30–14:00):** ${_fmt(g('day_part_expectancy').get('MID', np.nan))}
+- **Late (14:00–16:00):** ${_fmt(g('day_part_expectancy').get('LATE', np.nan))}
 - **Other:** {_fmt(g('day_part_expectancy').get('OTHER', np.nan))}
 ### Performance by Exit Reason
 - **Target:**
@@ -753,9 +847,9 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
   - Number of Trades: {int(g('num_trades_long', 0))}
   - Win Rate: {_fmt(g('win_rate_long_pct'), pct=True)}
   - Net Profit: ${_fmt(g('net_profit_long'))}
-  - Average Win: ${_fmt(g('avg_win_long'))}
+  - Average Win: {_fmt(g('avg_win_long'))}
   - Average Loss: {_fmt(g('avg_loss_long'))}
-  - Expectancy: ${_fmt(g('expectancy_long'))}
+  - Expectancy: {_fmt(g('expectancy_long'))}
   - Average Hold Time: {_fmt(g('avg_hold_long_mins'))} minutes
   - Median Hold Time: {_fmt(g('median_hold_long_mins'))} minutes
   - Points per Contract: {_fmt(g('points_long'))}
@@ -765,7 +859,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
   - Net Profit: ${_fmt(g('net_profit_short'))}
   - Average Win: {_fmt(g('avg_win_short'))}
   - Average Loss: {_fmt(g('avg_loss_short'))}
-  - Expectancy: ${_fmt(g('expectancy_short'))}
+  - Expectancy: {_fmt(g('expectancy_short'))}
   - Average Hold Time: {_fmt(g('avg_hold_short_mins'))} minutes
   - Median Hold Time: {_fmt(g('median_hold_short_mins'))} minutes
   - Points per Contract: {_fmt(g('points_short'))}
@@ -827,7 +921,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.3.2",
+        version="1.3.3",
     )
     all_metrics = []
     for csv_path in csv_paths:
