@@ -5,7 +5,7 @@
 # - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts
 # - Updates: Aligns with SuperSignal_v7_RTH15_v4.3, excludes non-RTH15 trades, uses BTO/STO terminology,
 #   includes points-based analysis with 1% target success rate, fixes session tagging,
-#   adds stop-loss analysis, fixes NameError for max_dd_pct in empty DataFrame case
+#   adds stop-loss analysis, fixes NameError for max_dd_pct, fixes stop-loss detection
 # - Verified error-free on SuperSignal_RTH15_v7_v43_MES_100125.csv (382 orders → ~185 RTH trades)
 
 import os
@@ -37,7 +37,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.4.11"  # Updated for max_dd_pct fix
+    version: str = "1.4.12"  # Updated for stop-loss detection fix
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -107,7 +107,7 @@ def _profit_factor(pl: pd.Series) -> float:
 def _exit_reason(text: str) -> str:
     s = str(text).upper()
     if any(w in s for w in ["TARGET", "TGT", "TP", "PROFIT"]): return "Target"
-    if any(w in s for w in ["STOP", "SL", "STOPPED"]): return "Stop"
+    if any(w in s for w in ["STC STOP", "BTC STOP", "STOP ", "SL ", "STOPPED"]): return "Stop"
     if any(w in s for w in ["TIME", "TIME EXIT", "TIMED", "TIMEOUT", "DAILY"]): return "Time"
     if any(w in s for w in ["MANUAL", "FLATTEN", "MKT CLOSE", "DISCRETIONARY", "OPPOSING"]): return "Other"
     return "Close"
@@ -902,7 +902,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.4.11",
+        version="1.4.12",
     )
     all_metrics = []
     for csv_path in csv_paths:
@@ -910,7 +910,4 @@ if __name__ == "__main__":
         results = run_backtest(csv_path, cfg_global)
         for r in results:
             m = r["metrics"]
-            m["csv"] = str(Path(csv_path).name)
-            all_metrics.append(m)
-
-# End of Code
+            m["
