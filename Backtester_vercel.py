@@ -332,11 +332,11 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
     return df
 
 # =========================
-# Metrics (RTH only)
+# Metrics
 # =========================
 
-def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: str = "RTH") -> dict:
-    df = trades_rth.copy()
+def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str) -> dict:
+    df = trades_df.copy()
 
     if 'AdjustedNetPL' not in df.columns:
         raise RuntimeError("AdjustedNetPL missing; call apply_stoploss_corrections() before compute_metrics().")
@@ -382,7 +382,7 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
     largest_loss = float(pl_net.min()) if len(pl_net) else np.nan
 
     metrics = {
-        "scope": scope_label,
+        "scope": scope_label,  # "ALL" or "RTH"
         "strategy_name": cfg.strategy_name,
         "version": cfg.version,
         "timeframe": cfg.timeframe,
@@ -408,22 +408,22 @@ def compute_metrics(trades_rth: pd.DataFrame, cfg: BacktestConfig, scope_label: 
     return metrics
 
 # =========================
-# Visuals (simplified for Vercel)
+# Visuals (ALL sessions by default)
 # =========================
 
-def save_visuals_and_tables(trades_rth: pd.DataFrame, cfg: BacktestConfig, outdir: str) -> None:
+def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir: str, title_suffix: str = "ALL") -> None:
     os.makedirs(outdir, exist_ok=True)
-    pl = trades_rth['AdjustedNetPL'].fillna(0.0)
+    pl = trades_df['AdjustedNetPL'].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
 
-    # Equity curve (simplified)
+    # Equity curve (ALL)
     plt.figure(figsize=(9, 4.5))
     plt.plot(equity.index, equity.values)
     plt.ylabel("Equity ($)")
     plt.xlabel("Trade #")
-    plt.title(f"Equity Curve — {cfg.strategy_name} ({cfg.timeframe}) [RTH, SL-adjusted]")
+    plt.title(f"Equity Curve — {cfg.strategy_name} ({cfg.timeframe}) [{title_suffix}, SL-adjusted]")
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "equity_curve_180d.png"), dpi=160, bbox_inches='tight')
+    plt.savefig(os.path.join(outdir, f"equity_curve_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
 
     # Drawdown curve
@@ -432,27 +432,27 @@ def save_visuals_and_tables(trades_rth: pd.DataFrame, cfg: BacktestConfig, outdi
     plt.plot(dd.index, dd.values * 100.0)
     plt.ylabel("Drawdown (%)")
     plt.xlabel("Trade #")
-    plt.title("Drawdown Curve [RTH, SL-adjusted]")
+    plt.title(f"Drawdown Curve [{title_suffix}, SL-adjusted]")
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "drawdown_curve.png"), dpi=160, bbox_inches='tight')
+    plt.savefig(os.path.join(outdir, f"drawdown_curve_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
 
     # Histogram of trade P/L
     plt.figure(figsize=(9, 4.5))
-    plt.hist(trades_rth['AdjustedNetPL'].dropna().values, bins=30)
+    plt.hist(trades_df['AdjustedNetPL'].dropna().values, bins=30)
     plt.xlabel("Net P/L per Trade ($) — SL-adjusted")
     plt.ylabel("Count")
-    plt.title("Trade P/L Distribution [RTH]")
+    plt.title(f"Trade P/L Distribution [{title_suffix}]")
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "pl_histogram.png"), dpi=160, bbox_inches='tight')
+    plt.savefig(os.path.join(outdir, f"pl_histogram_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
 
     # Monthly performance table
-    dt = pd.to_datetime(trades_rth['ExitTime'], errors='coerce')
-    monthly = pd.DataFrame({'NetPL': trades_rth['AdjustedNetPL'].values}, index=dt)
+    dt = pd.to_datetime(trades_df['ExitTime'], errors='coerce')
+    monthly = pd.DataFrame({'NetPL': trades_df['AdjustedNetPL'].values}, index=dt)
     monthly = monthly.dropna().resample('ME').sum()
     monthly['ReturnPct'] = monthly['NetPL'] / cfg.initial_capital * 100.0
-    monthly.to_csv(os.path.join(outdir, "monthly_performance.csv"))
+    monthly.to_csv(os.path.join(outdir, f"monthly_performance_{title_suffix.lower()}.csv"))
 
 # =========================
 # Main runner
@@ -477,10 +477,10 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     outdir = cfg.outdir(csv_stem, instr, strategy_label)
     os.makedirs(outdir, exist_ok=True)
 
-    # Build trades (all trades first)
+    # Build trades (ALL trades first)
     trades_all = build_trades(df_raw, cfg.commission_per_round_trip)
 
-    # Session tags — use EntryTime, fallback to ExitTime (mirrors RTH logic)
+    # Session tags — EntryTime, fallback to ExitTime
     def _session_dt(row):
         et = row.get('EntryTime')
         return et if pd.notna(et) else row.get('ExitTime')
@@ -489,32 +489,39 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     # Apply stop-loss normalization
     trades_all = apply_stoploss_corrections(trades_all, cfg.point_value)
 
-    # Save enriched trades (all)
+    # Save enriched trades (ALL)
     trades_out = os.path.join(outdir, "trades_enriched.csv")
     trades_all.to_csv(trades_out, index=False)
 
-    # RTH subset (EntryTime, fallback to ExitTime)
+    # RTH subset
     def _rth_row(row):
-        t = row['EntryTime']
-        if pd.isna(t):
-            t = row.get('ExitTime')
+        t = row['EntryTime'] if pd.notna(row['EntryTime']) else row.get('ExitTime')
         return _in_rth(t)
 
     trades_rth = trades_all[trades_all.apply(_rth_row, axis=1)].copy()
 
-    # Metrics (RTH, SL-adjusted)
-    metrics = compute_metrics(trades_rth, cfg, scope_label="RTH")
-    metrics["strategy_name"] = strategy_label
-    metrics["instrument"] = instr
+    # Metrics (ALL primary, RTH snapshot)
+    metrics_all = compute_metrics(trades_all, cfg, scope_label="ALL")
+    metrics_all["strategy_name"] = strategy_label
+    metrics_all["instrument"] = instr
+    metrics_all["num_trades_all"] = int(len(trades_all))
+    metrics_all["num_trades_rth"] = int(len(trades_rth))
+
+    metrics_rth = compute_metrics(trades_rth, cfg, scope_label="RTH")
+    # Prefix RTH keys for secondary display
+    for k, v in metrics_rth.items():
+        metrics_all[f"RTH_{k}"] = v
+
+    metrics = metrics_all
 
     # Save metrics
     with open(os.path.join(outdir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
 
-    # Visuals & tables (RTH)
-    save_visuals_and_tables(trades_rth, cfg, outdir)
+    # Visuals & tables (ALL as primary)
+    save_visuals_and_tables(trades_all, cfg, outdir, title_suffix="ALL")
 
-    # Generate analytics markdown
+    # Generate analytics markdown (ALL primary with RTH snapshot; charts at bottom)
     generate_analytics_md(trades_all, trades_rth, metrics, cfg, outdir)
 
     # Save config
@@ -551,7 +558,11 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     return results
 
 def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str) -> None:
-    """Generate simplified analytics markdown for Vercel (charts appended at the bottom)."""
+    """Generate analytics markdown:
+       - Primary KPIs: ALL sessions
+       - Snapshot section: RTH
+       - Charts at bottom (ALL)
+    """
     os.makedirs(outdir, exist_ok=True)
     m = metrics
 
@@ -566,37 +577,47 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
         except Exception:
             return str(x)
 
-    first_dt = pd.to_datetime(trades_rth['ExitTime'], errors='coerce').min()
-    last_dt  = pd.to_datetime(trades_rth['ExitTime'], errors='coerce').max()
-    instrument = metrics.get('instrument', '/UNK')
+    first_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').min()
+    last_dt_all  = pd.to_datetime(trades_all['ExitTime'], errors='coerce').max()
+    instrument = g('instrument', '/UNK')
 
     md = f"""
 # Strategy Analysis Report
 
 **Strategy:** {g('strategy_name')}  
 **Instrument:** {instrument}  
-**Date Range:** {first_dt.date() if pd.notna(first_dt) else 'n/a'} → {last_dt.date() if pd.notna(last_dt) else 'n/a'}  
+**Date Range (ALL):** {first_dt_all.date() if pd.notna(first_dt_all) else 'n/a'} → {last_dt_all.date() if pd.notna(last_dt_all) else 'n/a'}  
 **Timeframe:** {g('timeframe')}  
 **Run Date:** {datetime.now().strftime('%Y-%m-%d')}  
-**Session Basis:** New York time (ET). **Metrics Scope:** {g('scope', 'RTH')} (09:30–16:00)  
+**Session Basis:** New York time (ET)  
 **P/L Basis:** *All KPIs computed on **SL-adjusted net P/L** (cap −$100 per trade including commissions).*  
-**Initial Capital:** ${_fmt(g('initial_capital'), 0)}  
-**Commission (RT / contract):** ${_fmt(cfg.commission_per_round_trip, 2)}  
+
+**Trades:** ALL = {int(g('num_trades_all', 0))} | RTH = {int(g('num_trades_rth', 0))}
 
 ---
 
-## Key Performance Indicators
-- **Net Profit (adjusted):** ${_fmt(g('net_profit'))}
-- **Total Return:** {_fmt(g('total_return_pct'), pct=True)}
-- **Win Rate:** {_fmt(g('win_rate_pct'), pct=True)}
-- **Profit Factor:** {_fmt(g('profit_factor'))}
-- **Max Drawdown:** ${_fmt(g('max_drawdown_dollars'))} ({_fmt(g('max_drawdown_pct'), pct=True)})
-- **Sharpe (annualized):** {_fmt(g('sharpe_annualized'))}
-- **Total Trades:** {int(g('num_trades', 0))}
+## Key Performance Indicators — ALL Sessions
+- **Net Profit (ALL):** ${_fmt(g('net_profit'))}
+- **Total Return (ALL):** {_fmt(g('total_return_pct'), pct=True)}
+- **Win Rate (ALL):** {_fmt(g('win_rate_pct'), pct=True)}
+- **Profit Factor (ALL):** {_fmt(g('profit_factor'))}
+- **Max Drawdown (ALL):** ${_fmt(g('max_drawdown_dollars'))} ({_fmt(g('max_drawdown_pct'), pct=True)})
+- **Sharpe (annualized, ALL):** {_fmt(g('sharpe_annualized'))}
+- **Total Trades (ALL):** {int(g('num_trades', 0))}
 
 ---
 
-## Performance Details
+## RTH Snapshot (09:30–16:00 ET)
+- **Net Profit (RTH):** ${_fmt(g('RTH_net_profit'))}
+- **Win Rate (RTH):** {_fmt(g('RTH_win_rate_pct'), pct=True)}
+- **Profit Factor (RTH):** {_fmt(g('RTH_profit_factor'))}
+- **Max Drawdown (RTH):** ${_fmt(g('RTH_max_drawdown_dollars'))} ({_fmt(g('RTH_max_drawdown_pct'), pct=True)})
+- **Sharpe (annualized, RTH):** {_fmt(g('RTH_sharpe_annualized'))}
+- **Total Trades (RTH):** {int(g('num_trades_rth', 0))}
+
+---
+
+## Performance Details — ALL
 - **Average Win:** ${_fmt(g('avg_win_dollars'))}
 - **Average Loss:** ${_fmt(g('avg_loss_dollars'))}
 - **Expectancy per Trade:** ${_fmt(g('expectancy_per_trade_dollars'))}
@@ -607,9 +628,9 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 ---
 
 ## Charts
-![Equity Curve](equity_curve_180d.png)
-![Drawdown Curve](drawdown_curve.png)
-![Trade P/L Distribution](pl_histogram.png)
+![Equity Curve (ALL)](equity_curve_all.png)
+![Drawdown Curve (ALL)](drawdown_curve_all.png)
+![Trade P/L Distribution (ALL)](pl_histogram_all.png)
 
 *Report generated by DataAnalyzer v{cfg.version}*
 """
@@ -620,7 +641,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 if __name__ == "__main__":
     import argparse, glob, sys
 
-    parser = argparse.ArgumentParser(description="Lean analysis of TOS Strategy Report CSV (trade data only). RTH metrics + session tags.")
+    parser = argparse.ArgumentParser(description="Lean analysis of TOS Strategy Report CSV (trade data only). ALL sessions primary + RTH snapshot.")
     parser.add_argument(
         "--csv",
         nargs="+",
