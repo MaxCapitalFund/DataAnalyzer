@@ -3,7 +3,7 @@
 # Combines comprehensive metrics, visuals, and robustness with serverless efficiency
 # - Stop-loss cap: -$100 per trade per contract
 # - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts
-# - Fixes: Time formatting (hours + minutes, no $), observed=False for groupby
+# - Updates: PM45 session adjusted to 03:00–09:15 ET per input; PM45 Snapshot included
 # - Verified error-free on StrategyReports_RTH15_v7_43_Date93025.csv (383 orders → 191 trades)
 
 import os
@@ -32,10 +32,11 @@ class BacktestConfig:
     instruments: Tuple[str, ...] = ("/MES",)
     timeframe: str = "180d:15m"
     session_hours_rth: Tuple[str, str] = ("09:30", "16:00")
+    session_hours_pm: Tuple[str, str] = ("03:00", "09:15")  # Updated for PM45 (per input)
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.4.4"  # Updated for time formatting fix
+    version: str = "1.4.6"  # Updated for PM45 session adjustment
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -61,7 +62,7 @@ def _parse_datetime(series: pd.Series) -> pd.Series:
         parsed = pd.to_datetime(series, errors='coerce')
     return parsed
 
-PRE_START, PRE_END = time(3, 0), time(9, 29)
+PRE_START, PRE_END = time(3, 0), time(9, 15)  # Updated PRE_END to 09:15 per input
 OPEN_START, OPEN_END = time(9, 30), time(11, 30)
 LUNCH_START, LUNCH_END = time(11, 30), time(14, 0)
 CLOSE_START, CLOSE_END = time(14, 0), time(16, 0)
@@ -81,6 +82,12 @@ def _in_rth(dt: pd.Timestamp) -> bool:
         return False
     t = dt.time()
     return OPEN_START <= t <= CLOSE_END
+
+def _in_pm(dt: pd.Timestamp) -> bool:
+    if pd.isna(dt):
+        return False
+    t = dt.time()
+    return PRE_START <= t <= PRE_END
 
 def _tag_day_part(dt: pd.Timestamp) -> str:
     if pd.isna(dt):
@@ -201,7 +208,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
     def _safe_num(x):
         return pd.to_numeric(x, errors='coerce')
     OPEN_RX = r"\b(?:BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN|STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT|OPEN)\b"
-    CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)\b"
+    CLOSE_RX = r"\b(?:STC|SELL TO_CLOSE|SLD TO CLOSE|BTC|BUY_TO_CLOSE|CLOSE)\b"
     unpaired_count = 0
     i = 0
     while i < len(df) - 1:
@@ -281,7 +288,7 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
 
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str) -> dict:
     if trades_df.empty:
-        warnings.warn("Empty trades DataFrame. Returning default metrics with NaN values.")
+        warnings.warn(f"Empty trades DataFrame for {scope_label}. Returning default metrics with NaN values.")
         return {
             "scope": scope_label,
             "strategy_name": cfg.strategy_name,
@@ -505,7 +512,7 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
 # Analytics Markdown Generation
 # =========================
 
-def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str) -> None:
+def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, trades_pm45: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str) -> None:
     os.makedirs(outdir, exist_ok=True)
     m = metrics
     def g(key, default=np.nan):
@@ -537,7 +544,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 **Run Date:** {datetime.now().strftime('%Y-%m-%d')}
 **Session Basis:** New York time (ET)
 **P/L Basis:** *All KPIs computed on **SL-adjusted net P/L** (cap −$100 per trade including commissions).*
-**Trades:** ALL = {int(g('num_trades_all', 0))} | RTH = {int(g('num_trades_rth', 0))}
+**Trades:** ALL = {int(g('num_trades_all', 0))} | RTH = {int(g('num_trades_rth', 0))} | PM45 = {int(g('num_trades_pm45', 0))}
 ---
 ## Key Performance Indicators — ALL Sessions
 - **Net Profit (ALL):** {_fmt(g('net_profit'))}
@@ -555,6 +562,14 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Max Drawdown (RTH):** {_fmt(g('RTH_max_drawdown_dollars'))} ({_fmt(g('RTH_max_drawdown_pct'), pct=True)})
 - **Sharpe (Annualized, RTH):** {_fmt(g('RTH_sharpe_annualized'))}
 - **Total Trades (RTH):** {int(g('num_trades_rth', 0))}
+---
+## PM45 Snapshot (03:00–09:15 ET)
+- **Net Profit (PM45):** {_fmt(g('PM45_net_profit'))}
+- **Win Rate (PM45):** {_fmt(g('PM45_win_rate_pct'), pct=True)}
+- **Profit Factor (PM45):** {_fmt(g('PM45_profit_factor'), p=3)}
+- **Max Drawdown (PM45):** {_fmt(g('PM45_max_drawdown_dollars'))} ({_fmt(g('PM45_max_drawdown_pct'), pct=True)})
+- **Sharpe (Annualized, PM45):** {_fmt(g('PM45_sharpe_annualized'))}
+- **Total Trades (PM45):** {int(g('num_trades_pm45', 0))}
 ---
 ## Efficiency Metrics
 ### Holding Time Analysis
@@ -680,23 +695,31 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     def _rth_row(row):
         t = row['EntryTime'] if pd.notna(row['EntryTime']) else row.get('ExitTime')
         return _in_rth(t)
+    def _pm_row(row):
+        t = row['EntryTime'] if pd.notna(row['EntryTime']) else row.get('ExitTime')
+        return _in_pm(t)
     trades_rth = trades_all[trades_all.apply(_rth_row, axis=1)].copy()
+    trades_pm45 = trades_all[trades_all.apply(_pm_row, axis=1)].copy()
     metrics_all = compute_metrics(trades_all, cfg, scope_label="ALL")
     metrics_all["strategy_name"] = strategy_label
     metrics_all["instrument"] = instr
     metrics_all["num_trades_all"] = int(len(trades_all))
     metrics_all["num_trades_rth"] = int(len(trades_rth))
+    metrics_all["num_trades_pm45"] = int(len(trades_pm45))
     metrics_rth = compute_metrics(trades_rth, cfg, scope_label="RTH")
+    metrics_pm45 = compute_metrics(trades_pm45, cfg, scope_label="PM45")
     for k, v in metrics_rth.items():
         metrics_all[f"RTH_{k}"] = v
+    for k, v in metrics_pm45.items():
+        metrics_all[f"PM45_{k}"] = v
     metrics = metrics_all
     with open(os.path.join(outdir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
     save_visuals_and_tables(trades_all, cfg, outdir, title_suffix="ALL")
-    generate_analytics_md(trades_all, trades_rth, metrics, cfg, outdir)
+    generate_analytics_md(trades_all, trades_rth, trades_pm45, metrics, cfg, outdir)
     with open(os.path.join(outdir, "config.json"), "w") as f:
         json.dump(asdict(cfg), f, indent=2)
-    return trades_all, trades_rth, metrics, outdir
+    return trades_all, trades_rth, trades_pm45, metrics, outdir
 
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(tos_csv_path).stem.replace(' ', '_')
@@ -714,13 +737,13 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
         symbols = ['/MES']
     results = []
     for instr in symbols:
-        trades_all, trades_rth, metrics, outdir = run_backtest_for_instrument(raw, instr, cfg, csv_stem)
+        trades_all, trades_rth, trades_pm45, metrics, outdir = run_backtest_for_instrument(raw, instr, cfg, csv_stem)
         results.append({"instrument": instr, "metrics": metrics, "outdir": outdir})
     return results
 
 if __name__ == "__main__":
     import argparse, glob, sys
-    parser = argparse.ArgumentParser(description="Lean analysis of TOS Strategy Report CSV (trade data only). ALL sessions primary + RTH snapshot.")
+    parser = argparse.ArgumentParser(description="Lean analysis of TOS Strategy Report CSV (trade data only). ALL sessions primary + RTH and PM45 snapshots.")
     parser.add_argument(
         "--csv",
         nargs="+",
@@ -750,7 +773,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.4.4",
+        version="1.4.6",
     )
     all_metrics = []
     for csv_path in csv_paths:
