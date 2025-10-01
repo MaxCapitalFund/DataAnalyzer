@@ -204,90 +204,54 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
 # =========================
 
 def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
-    id_col = 'Id' if 'Id' in df.columns else None
     trades = []
     def _safe_num(x):
         return pd.to_numeric(x, errors='coerce')
     OPEN_RX = r"\b(?:BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN|STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT|OPEN)\b"
     CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)\b"
-    if id_col:
-        for tid, grp in df.groupby(id_col, sort=False):
-            g = grp.sort_values('Date').copy()
-            side_up = g['Side'].astype(str).str.upper()
-            g['is_open'] = side_up.str.contains(OPEN_RX, regex=True, na=False)
-            g['is_close'] = side_up.str.contains(CLOSE_RX, regex=True, na=False)
-            entry_rows = g[g['is_open']]
-            close_rows = g[g['is_close']]
-            if len(entry_rows) and len(close_rows):
-                entry = entry_rows.iloc[0]
-                after_entry_close = close_rows[close_rows['Date'] >= entry['Date']]
-                exit_ = after_entry_close.iloc[0] if len(after_entry_close) else close_rows.iloc[-1]
-                entry_qty = _safe_num(entry.get('Qty'))
-                qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
-                direction = 'Unknown'
-                es = str(entry.get('Side', '')).upper()
-                if re.search(r"\b(BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN)\b", es):
-                    direction = 'Long'
-                elif re.search(r"\b(STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT)\b", es):
-                    direction = 'Short'
-                elif pd.notna(entry_qty):
-                    direction = 'Long' if entry_qty > 0 else 'Short'
-                trade_pl = _safe_num(exit_.get('TradePL'))
-                commission = commission_rt * qty_abs
-                net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
-                trades.append({
-                    'Id': tid,
-                    'EntryTime': entry['Date'],
-                    'ExitTime': exit_['Date'],
-                    'EntryPrice': _safe_num(entry.get('Price')),
-                    'ExitPrice': _safe_num(exit_.get('Price')),
-                    'EntryQty': entry_qty,
-                    'ExitQty': _safe_num(exit_.get('Qty')),
-                    'QtyAbs': qty_abs,
-                    'TradePL': trade_pl,
-                    'GrossPL': trade_pl,  # Gross before commissions
-                    'Commission': commission,
-                    'NetPL': net_pl,  # After commissions
-                    'BaseStrategy': entry.get('BaseStrategy', 'Unknown'),
-                    'StrategyRaw': entry.get('Strategy', ''),
-                    'Symbol': entry.get('Symbol', ''),
-                    'EntrySide': str(entry.get('Side', '')),
-                    'ExitSide': str(exit_.get('Side', '')),
-                    'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order')),
-                    'Direction': direction,
-                })
-    # Fallback: treat each close as a trade row
-    if not trades:
-        g = df.sort_values('Date').copy()
-        side_up = g['Side'].astype(str).str.upper()
-        close_rows = g[side_up.str.contains(CLOSE_RX, regex=True, na=False)]
-        for _, row in close_rows.iterrows():
-            entry_qty = np.nan
-            qty_abs = 1.0
-            trade_pl = _safe_num(row.get('TradePL'))
+    i = 0
+    while i < len(df) - 1:
+        entry = df.iloc[i]
+        exit_ = df.iloc[i + 1]
+        side_entry = str(entry['Side']).upper()
+        side_exit = str(exit_['Side']).upper()
+        if re.search(OPEN_RX, side_entry) and re.search(CLOSE_RX, side_exit):
+            entry_qty = _safe_num(entry.get('Qty'))
+            qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
+            direction = 'Unknown'
+            if re.search(r"\b(BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN)\b", side_entry):
+                direction = 'Long'
+            elif re.search(r"\b(STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT)\b", side_entry):
+                direction = 'Short'
+            elif pd.notna(entry_qty):
+                direction = 'Long' if entry_qty > 0 else 'Short'
+            trade_pl = _safe_num(exit_.get('TradePL'))
             commission = commission_rt * qty_abs
             net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
             trades.append({
-                'Id': row.get('Id', np.nan),
-                'EntryTime': pd.NaT,
-                'ExitTime': row['Date'],
-                'EntryPrice': np.nan,
-                'ExitPrice': _safe_num(row.get('Price')),
+                'Id': entry.get('Id', np.nan),
+                'EntryTime': entry['Date'],
+                'ExitTime': exit_['Date'],
+                'EntryPrice': _safe_num(entry.get('Price')),
+                'ExitPrice': _safe_num(exit_.get('Price')),
                 'EntryQty': entry_qty,
-                'ExitQty': _safe_num(row.get('Qty')),
+                'ExitQty': _safe_num(exit_.get('Qty')),
                 'QtyAbs': qty_abs,
                 'TradePL': trade_pl,
                 'GrossPL': trade_pl,
                 'Commission': commission,
                 'NetPL': net_pl,
-                'BaseStrategy': row.get('BaseStrategy', 'Unknown'),
-                'StrategyRaw': row.get('Strategy', ''),
-                'Symbol': row.get('Symbol', ''),
-                'EntrySide': str(row.get('Side', '')),
-                'ExitSide': str(row.get('Side', '')),
-                'ExitReason': _exit_reason(row.get('Side') or row.get('Type') or row.get('Order')),
-                'Direction': 'Unknown',
+                'BaseStrategy': entry.get('BaseStrategy', 'Unknown'),
+                'StrategyRaw': entry.get('Strategy', ''),
+                'Symbol': entry.get('Symbol', ''),
+                'EntrySide': str(entry.get('Side', '')),
+                'ExitSide': str(exit_.get('Side', '')),
+                'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order')),
+                'Direction': direction,
             })
+            i += 2
+        else:
+            i += 1
     t = pd.DataFrame(trades)
     if t.empty:
         return t.assign(HoldMins=np.nan)
@@ -307,9 +271,7 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
     """
     df = trades.copy()
     df['SLBreached'] = df['NetPL'] < -100.0
-    # Adjusted Net P/L (after commissions), capped at -100
     df['AdjustedNetPL'] = np.where(df['SLBreached'], -100.0, df['NetPL'])
-    # Recompute points per contract from "gross-adjusted" P/L (exclude commissions for interpretability)
     qty_abs = pd.to_numeric(df['QtyAbs'], errors='coerce').replace(0, np.nan)
     gross_adjusted = np.where(df['SLBreached'], -100.0 + df['Commission'], df['NetPL'] + df['Commission'])
     df['PointsPerContract'] = gross_adjusted / (point_value * qty_abs)
@@ -323,27 +285,20 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     df = trades_df.copy()
     if 'AdjustedNetPL' not in df.columns:
         raise RuntimeError("AdjustedNetPL missing; call apply_stoploss_corrections() before compute_metrics().")
-    # Gross vs Net P/L series
     pl_net = df['AdjustedNetPL'].fillna(0.0)
     pl_gross = df['GrossPL'].fillna(0.0) if 'GrossPL' in df.columns else pl_net.copy()
-    # Equity from NET P/L (Adjusted)
     equity = cfg.initial_capital + pl_net.cumsum()
-    # Totals & returns
     total_net = float(pl_net.sum())
     total_gross = float(pl_gross.sum())
     total_return_pct = (total_net / cfg.initial_capital) * 100.0 if cfg.initial_capital else np.nan
-    # Win/loss (Adjusted)
     win_mask = pl_net > 0
     loss_mask = pl_net < 0
     avg_win = float(pl_net[win_mask].mean()) if win_mask.any() else np.nan
     avg_loss = float(pl_net[loss_mask].mean()) if loss_mask.any() else np.nan
-    # Drawdowns (Adjusted net equity)
     max_dd_pct = abs(_max_drawdown(equity)) * 100.0
     max_dd_dollars = float((equity.cummax() - equity).max())
     recovery_factor = float(total_net / max_dd_dollars) if max_dd_dollars else np.nan
-    # Expectancy
     expectancy_dollars = float(pl_net.mean()) if len(pl_net) else np.nan
-    # Risk-adjusted (per-trade returns vs initial capital; quick proxy)
     trade_rets = pl_net / cfg.initial_capital if cfg.initial_capital else pd.Series(np.nan, index=pl_net.index)
     std = trade_rets.std(ddof=1)
     per_trade_sharpe = float(trade_rets.mean() / std) if std and std > 0 else np.nan
@@ -354,7 +309,6 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     sharpe_annualized = float(np.sqrt(trades_per_year) * per_trade_sharpe) if trades_per_year and per_trade_sharpe == per_trade_sharpe else np.nan
     largest_win = float(pl_net.max()) if len(pl_net) else np.nan
     largest_loss = float(pl_net.min()) if len(pl_net) else np.nan
-    # Holding Time Analysis
     hold_mins = df['HoldMins'].dropna()
     winners = df[win_mask]['HoldMins'].dropna()
     losers = df[loss_mask]['HoldMins'].dropna()
@@ -367,11 +321,9 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     hold_labels = ['0-15', '15-60', '60-180', '>180']
     df['HoldBin'] = pd.cut(df['HoldMins'], bins=hold_bins, labels=hold_labels, include_lowest=True)
     hold_dist = df['HoldBin'].value_counts().reindex(hold_labels).fillna(0).to_dict()
-    # Trade Frequency by Session
     df['Session'] = df.apply(lambda r: _tag_session(r['EntryTime'] if pd.notna(r['EntryTime']) else r['ExitTime']), axis=1)
     session_counts = df['Session'].value_counts().to_dict()
     session_expectancy = df.groupby('Session')['AdjustedNetPL'].mean().to_dict()
-    # Day of Week Performance
     df['DayOfWeek'] = df['ExitTime'].dt.day_name()
     dow_metrics = {}
     for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']:
@@ -381,19 +333,29 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
             'net_pl': float(day_df['AdjustedNetPL'].sum()) if len(day_df) else np.nan,
             'expectancy': float(day_df['AdjustedNetPL'].mean()) if len(day_df) else np.nan
         }
-    # Expectancy by Trade Length
     expectancy_by_hold = df.groupby('HoldBin')['AdjustedNetPL'].mean().reindex(hold_labels).fillna(np.nan).to_dict()
-    # Capital Efficiency
     avg_capital_per_trade = df['EntryPrice'] * df['QtyAbs'] * cfg.point_value
     avg_hold_mins = df['HoldMins'].mean() if len(df['HoldMins'].dropna()) else 1.0
     capital_efficiency = total_net / (avg_capital_per_trade.mean() * avg_hold_mins) if avg_capital_per_trade.mean() else np.nan
-    # Concentration Risk
     top_10_pct_count = max(1, int(len(pl_net) * 0.1))
     top_trades = pl_net.nlargest(top_10_pct_count).sum()
     concentration_risk = (top_trades / total_net * 100) if total_net != 0 else np.nan
-    # Trade Outcome by Day Part
     df['DayPart'] = df['ExitTime'].apply(_tag_day_part)
     day_part_expectancy = df.groupby('DayPart')['AdjustedNetPL'].mean().reindex(['EARLY', 'MID', 'LATE', 'OTHER']).fillna(np.nan).to_dict()
+    df_long = df[df['Direction'] == 'Long']
+    df_short = df[df['Direction'] == 'Short']
+    num_trades_long = len(df_long)
+    win_rate_long_pct = float((df_long['AdjustedNetPL'] > 0).mean() * 100) if num_trades_long else np.nan
+    net_profit_long = float(df_long['AdjustedNetPL'].sum()) if num_trades_long else np.nan
+    avg_win_long = float(df_long[df_long['AdjustedNetPL'] > 0]['AdjustedNetPL'].mean()) if (df_long['AdjustedNetPL'] > 0).any() else np.nan
+    avg_loss_long = float(df_long[df_long['AdjustedNetPL'] < 0]['AdjustedNetPL'].mean()) if (df_long['AdjustedNetPL'] < 0).any() else np.nan
+    expectancy_long = float(df_long['AdjustedNetPL'].mean()) if num_trades_long else np.nan
+    num_trades_short = len(df_short)
+    win_rate_short_pct = float((df_short['AdjustedNetPL'] > 0).mean() * 100) if num_trades_short else np.nan
+    net_profit_short = float(df_short['AdjustedNetPL'].sum()) if num_trades_short else np.nan
+    avg_win_short = float(df_short[df_short['AdjustedNetPL'] > 0]['AdjustedNetPL'].mean()) if (df_short['AdjustedNetPL'] > 0).any() else np.nan
+    avg_loss_short = float(df_short[df_short['AdjustedNetPL'] < 0]['AdjustedNetPL'].mean()) if (df_short['AdjustedNetPL'] < 0).any() else np.nan
+    expectancy_short = float(df_short['AdjustedNetPL'].mean()) if num_trades_short else np.nan
     metrics = {
         "scope": scope_label,
         "strategy_name": cfg.strategy_name,
@@ -428,7 +390,19 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
         "expectancy_by_hold": expectancy_by_hold,
         "capital_efficiency": capital_efficiency,
         "concentration_risk_pct": concentration_risk,
-        "day_part_expectancy": day_part_expectancy
+        "day_part_expectancy": day_part_expectancy,
+        "num_trades_long": num_trades_long,
+        "win_rate_long_pct": win_rate_long_pct,
+        "net_profit_long": net_profit_long,
+        "avg_win_long": avg_win_long,
+        "avg_loss_long": avg_loss_long,
+        "expectancy_long": expectancy_long,
+        "num_trades_short": num_trades_short,
+        "win_rate_short_pct": win_rate_short_pct,
+        "net_profit_short": net_profit_short,
+        "avg_win_short": avg_win_short,
+        "avg_loss_short": avg_loss_short,
+        "expectancy_short": expectancy_short
     }
     return metrics
 
@@ -440,7 +414,6 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     os.makedirs(outdir, exist_ok=True)
     pl = trades_df['AdjustedNetPL'].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
-    # Equity curve
     plt.figure(figsize=(9, 4.5))
     plt.plot(equity.index, equity.values)
     plt.ylabel("Equity ($)")
@@ -449,9 +422,8 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"equity_curve_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
-    # Drawdown curve
-    dd = equity / equity.cummax() - 1.0
     plt.figure(figsize=(9, 4.5))
+    dd = equity / equity.cummax() - 1.0
     plt.plot(dd.index, dd.values * 100.0)
     plt.ylabel("Drawdown (%)")
     plt.xlabel("Trade #")
@@ -459,7 +431,6 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"drawdown_curve_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
-    # Histogram of trade P/L
     plt.figure(figsize=(9, 4.5))
     plt.hist(trades_df['AdjustedNetPL'].dropna().values, bins=30)
     plt.xlabel("Net P/L per Trade ($) — SL-adjusted")
@@ -468,7 +439,6 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"pl_histogram_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
-    # Histogram of hold times
     plt.figure(figsize=(9, 4.5))
     plt.hist(trades_df['HoldMins'].dropna().values, bins=30)
     plt.xlabel("Hold Time (Minutes)")
@@ -477,7 +447,6 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"hold_time_histogram_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
-    # Monthly performance table
     dt = pd.to_datetime(trades_df['ExitTime'], errors='coerce')
     monthly = pd.DataFrame({'NetPL': trades_df['AdjustedNetPL'].values}, index=dt)
     monthly = monthly.dropna().resample('ME').sum()
@@ -489,12 +458,9 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
 # =========================
 
 def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str], cfg: BacktestConfig, csv_stem: str):
-    # Strategy label pulled from CSV base strategy
     strategy_label = df_raw['BaseStrategy'].dropna().iloc[0] if 'BaseStrategy' in df_raw.columns and len(df_raw.dropna(subset=['BaseStrategy'])) else (cfg.strategy_name or 'Unknown')
-    # Normalize instrument and set point value
     instr = normalize_symbol(instrument or '/UNK')
     cfg.strategy_name = strategy_label
-    # Point value mapping
     pv = cfg.point_value
     if instr.upper() in {'/MES', 'MES'}:
         pv = 5.0
@@ -503,42 +469,31 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     cfg.point_value = pv
     outdir = cfg.outdir(csv_stem, instr, strategy_label)
     os.makedirs(outdir, exist_ok=True)
-    # Build trades (ALL trades first)
     trades_all = build_trades(df_raw, cfg.commission_per_round_trip)
-    # Session tags — EntryTime, fallback to ExitTime
     def _session_dt(row):
         et = row.get('EntryTime')
         return et if pd.notna(et) else row.get('ExitTime')
     trades_all['Session'] = trades_all.apply(lambda r: _tag_session(_session_dt(r)), axis=1)
-    # Apply stop-loss normalization
     trades_all = apply_stoploss_corrections(trades_all, cfg.point_value)
-    # Save enriched trades (ALL)
     trades_out = os.path.join(outdir, "trades_enriched.csv")
     trades_all.to_csv(trades_out, index=False)
-    # RTH subset
     def _rth_row(row):
         t = row['EntryTime'] if pd.notna(row['EntryTime']) else row.get('ExitTime')
         return _in_rth(t)
     trades_rth = trades_all[trades_all.apply(_rth_row, axis=1)].copy()
-    # Metrics (ALL primary, RTH snapshot)
     metrics_all = compute_metrics(trades_all, cfg, scope_label="ALL")
     metrics_all["strategy_name"] = strategy_label
     metrics_all["instrument"] = instr
     metrics_all["num_trades_all"] = int(len(trades_all))
     metrics_all["num_trades_rth"] = int(len(trades_rth))
     metrics_rth = compute_metrics(trades_rth, cfg, scope_label="RTH")
-    # Prefix RTH keys for secondary display
     for k, v in metrics_rth.items():
         metrics_all[f"RTH_{k}"] = v
     metrics = metrics_all
-    # Save metrics
     with open(os.path.join(outdir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
-    # Visuals & tables (ALL as primary)
     save_visuals_and_tables(trades_all, cfg, outdir, title_suffix="ALL")
-    # Generate analytics markdown (ALL primary with RTH snapshot; charts at bottom)
     generate_analytics_md(trades_all, trades_rth, metrics, cfg, outdir)
-    # Save config
     with open(os.path.join(outdir, "config.json"), "w") as f:
         json.dump(asdict(cfg), f, indent=2)
     return trades_all, trades_rth, metrics, outdir
@@ -546,20 +501,17 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(tos_csv_path).stem.replace(' ', '_')
     raw = load_tos_strategy_report(tos_csv_path)
-    # Ensure normalized symbols
     if 'Symbol' in raw.columns:
         raw['Symbol'] = raw['Symbol'].map(normalize_symbol)
     else:
         raw['Symbol'] = "/UNK"
-    # Detect instruments present (normalized roots)
     symbols = raw['Symbol'].dropna().unique().tolist()
     if not symbols:
-        # Attempt extraction from Strategy text, normalize
-        s = raw['Strategy'].astype(str) if 'Strategy' in df.columns else pd.Series([], dtype=str)
+        s = raw['Strategy'].astype(str) if 'Strategy' in raw.columns else pd.Series([], dtype=str)
         pat = re.compile(r"/([A-Z]{1,3})")
         symbols = s.str.extract(pat, expand=False).dropna().map(lambda x: f"/{x}").map(normalize_symbol).unique().tolist()
     if not symbols:
-        symbols = ['/MES']  # fallback default
+        symbols = ['/MES']
     results = []
     for instr in symbols:
         trades_all, trades_rth, metrics, outdir = run_backtest_for_instrument(raw, instr, cfg, csv_stem)
@@ -571,6 +523,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
        - Primary KPIs: ALL sessions
        - Snapshot section: RTH
        - Efficiency and Effectiveness Metrics
+       - Performance by Direction
        - Charts at bottom (ALL)
     """
     os.makedirs(outdir, exist_ok=True)
@@ -669,21 +622,37 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - 60–180 min: ${_fmt(g('expectancy_by_hold').get('60-180', np.nan))}
 - >180 min: ${_fmt(g('expectancy_by_hold').get('>180', np.nan))}
 ### Capital Efficiency
-- **Net Profit per Trade-Minute of Capital:** ${_fmt(g('capital_efficiency'), 4)} per dollar-minute
+- **Net Profit per Trade-Minute of Capital:** {_fmt(g('capital_efficiency'), 4)} per dollar-minute
 ### Concentration Risk
 - **% of Net Profit from Top 10% of Trades:** {_fmt(g('concentration_risk_pct'), pct=True)}
 ### Trade Outcome by Day Part
 - **Early (09:30–11:30):** ${_fmt(g('day_part_expectancy').get('EARLY', np.nan))}
-- **Mid (11:30–14:00):** ${_fmt(g('day_part_expectancy').get('MID', np.nan))}
-- **Late (14:00–16:00):** ${_fmt(g('day_part_expectancy').get('LATE', np.nan))}
-- **Other:** ${_fmt(g('day_part_expectancy').get('OTHER', np.nan))}
+- **Mid (11:30–14:00):** {_fmt(g('day_part_expectancy').get('MID', np.nan))}
+- **Late (14:00–16:00):** {_fmt(g('day_part_expectancy').get('LATE', np.nan))}
+- **Other:** {_fmt(g('day_part_expectancy').get('OTHER', np.nan))}
+---
+## Performance by Direction
+- **Long Trades:**
+  - Number of Trades: {int(g('num_trades_long', 0))}
+  - Win Rate: {_fmt(g('win_rate_long_pct'), pct=True)}
+  - Net Profit: ${_fmt(g('net_profit_long'))}
+  - Average Win: ${_fmt(g('avg_win_long'))}
+  - Average Loss: ${_fmt(g('avg_loss_long'))}
+  - Expectancy: ${_fmt(g('expectancy_long'))}
+- **Short Trades:**
+  - Number of Trades: {int(g('num_trades_short', 0))}
+  - Win Rate: {_fmt(g('win_rate_short_pct'), pct=True)}
+  - Net Profit: ${_fmt(g('net_profit_short'))}
+  - Average Win: ${_fmt(g('avg_win_short'))}
+  - Average Loss: ${_fmt(g('avg_loss_short'))}
+  - Expectancy: ${_fmt(g('expectancy_short'))}
 ---
 ## Performance Details — ALL
-- **Average Win:** ${_fmt(g('avg_win_dollars'))}
-- **Average Loss:** ${_fmt(g('avg_loss_dollars'))}
-- **Expectancy per Trade:** ${_fmt(g('expectancy_per_trade_dollars'))}
-- **Largest Win:** ${_fmt(g('largest_winning_trade'))}
-- **Largest Loss:** ${_fmt(g('largest_losing_trade'))}
+- **Average Win:** {_fmt(g('avg_win_dollars'))}
+- **Average Loss:** {_fmt(g('avg_loss_dollars'))}
+- **Expectancy per Trade:** {_fmt(g('expectancy_per_trade_dollars'))}
+- **Largest Win:** {_fmt(g('largest_winning_trade'))}
+- **Largest Loss:** {_fmt(g('largest_losing_trade'))}
 - **Recovery Factor:** {_fmt(g('recovery_factor'))}
 ---
 ## Charts
@@ -710,7 +679,6 @@ if __name__ == "__main__":
     parser.add_argument("--commission", type=float, default=4.04, help="Commission per contract round trip.")
     parser.add_argument("--point_value", type=float, default=5.0, help="Default dollars per point per contract (used if instrument unknown).")
     args = parser.parse_args()
-    # Resolve CSVs
     resolved = []
     for item in args.csv:
         matches = glob.glob(item)
@@ -722,9 +690,8 @@ if __name__ == "__main__":
     if not csv_paths:
         print(f"[ERROR] No CSV files matched any of: {args.csv}", file=sys.stderr)
         sys.exit(1)
-    # global config
     cfg_global = BacktestConfig(
-        strategy_name="",  # will be set from CSV
+        strategy_name="",
         instruments=("/MES",),
         timeframe=args.timeframe,
         initial_capital=args.capital,
