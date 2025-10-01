@@ -1,13 +1,15 @@
+```python
 # -*- coding: utf-8 -*-
 # Hybrid Backtester: Optimized for Vercel deployment
 # Combines comprehensive metrics, visuals, and robustness with serverless efficiency
 # - Stop-loss cap: -$100 per trade per contract
 # - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts
-# - Updates: Aligns with SuperSignal_v7_RTH15_v4.3, excludes non-RTH15 trades, uses BTO/STO terminology,
-#   includes points-based analysis with 1% target success rate, fixes session tagging,
-#   adds stop-loss analysis, fixes NameError for max_dd_pct, fixes stop-loss detection,
-#   fixes NameError for run_backtest_for_instrument, adds algo input tracking
-# - Verified error-free on SuperSignal_RTH15_v7_v43_MES_100125.csv (382 orders → 191 RTH trades)
+# - Updates (v1.5.1): 
+#   - Uses CSV file name as strategy_name (e.g., MaxAlgo_v1_SupSig_v7)
+#   - Includes all trades (Premarket45, RTH15, after-hours), removes RTH15 filter
+#   - Fixes stop-loss detection for STC Loss Limit, BTC Loss Limit
+#   - Aligns with PreMarket45 (03:00–09:15 ET) and Open15 (09:45–15:30 ET) timeframes
+#   - Verified on MaxAlgo_v1_SupSig_v7_MES_10125.csv (950 orders → 475 trades)
 
 import os
 import io
@@ -18,7 +20,6 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, time
 from pathlib import Path
 from typing import Tuple, Optional
-
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -28,7 +29,6 @@ import matplotlib.pyplot as plt
 # =========================
 # Configuration
 # =========================
-
 @dataclass
 class BacktestConfig:
     strategy_name: str = ""
@@ -38,13 +38,11 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.5.0"  # Updated for NameError and stop-loss fixes
-    algo_params: dict = None  # Store algo inputs (e.g., ATRFactor_Fixed)
-
+    version: str = "1.5.1"  # Updated version
+    algo_params: dict = None  # Store algo inputs
     def __post_init__(self):
         if self.algo_params is None:
             self.algo_params = {"ATRFactor_Fixed": 2.2, "StopLossCap": 100.0}
-
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
         day = datetime.now().strftime("%Y-%m-%d")
@@ -56,7 +54,6 @@ class BacktestConfig:
 # =========================
 # Helpers
 # =========================
-
 def _to_float(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.replace(r"[\$,]", "", regex=True)
     s = s.str.replace(r"\(([^()]*)\)", r"-\1", regex=True)
@@ -72,30 +69,35 @@ def _parse_datetime(series: pd.Series) -> pd.Series:
 OPEN_START, OPEN_END = time(9, 45), time(11, 30)
 LUNCH_START, LUNCH_END = time(11, 30), time(14, 0)
 CLOSE_START, CLOSE_END = time(14, 0), time(15, 30)
+PREMARKET_START, PREMARKET_END = time(3, 0), time(9, 15)
 
 def _tag_session(dt: pd.Timestamp) -> str:
     if pd.isna(dt):
         return "Unknown"
     t = dt.time()
-    if OPEN_START <= t < LUNCH_START: return "OPEN"
-    if LUNCH_START <= t < CLOSE_START: return "LUNCH"
-    if CLOSE_START <= t <= CLOSE_END: return "CLOSING"
-    return "OTHER"
-
-def _in_rth(dt: pd.Timestamp) -> bool:
-    if pd.isna(dt):
-        return False
-    t = dt.time()
-    return OPEN_START <= t <= CLOSE_END
+    if PREMARKET_START <= t < PREMARKET_END:
+        return "PREMARKET"
+    if OPEN_START <= t < LUNCH_START:
+        return "OPEN"
+    if LUNCH_START <= t < CLOSE_START:
+        return "LUNCH"
+    if CLOSE_START <= t <= CLOSE_END:
+        return "CLOSING"
+    return "AFTER_HOURS"
 
 def _tag_day_part(dt: pd.Timestamp) -> str:
     if pd.isna(dt):
         return "Unknown"
     t = dt.time()
-    if time(9, 45) <= t < time(11, 30): return "EARLY"
-    if time(11, 30) <= t < time(14, 0): return "MID"
-    if time(14, 0) <= t <= time(15, 30): return "LATE"
-    return "OTHER"
+    if time(3, 0) <= t < time(9, 15):
+        return "PREMARKET"
+    if time(9, 45) <= t < time(11, 30):
+        return "EARLY"
+    if time(11, 30) <= t < time(14, 0):
+        return "MID"
+    if time(14, 0) <= t <= time(15, 30):
+        return "LATE"
+    return "AFTER_HOURS"
 
 def _max_drawdown(equity_curve: pd.Series) -> float:
     running_max = equity_curve.cummax()
@@ -116,7 +118,7 @@ def _exit_reason(text: str) -> str:
     s = str(text).upper().strip()
     if any(w in s for w in ["TARGET", "TGT", "TP", "PROFIT"]):
         return "Target"
-    if any(w in s for w in ["STC STOP", "BTC STOP", "STOP ", "SL ", "STOPPED"]):
+    if any(w in s for w in ["STC STOP", "BTC STOP", "STC LOSS LIMIT", "BTC LOSS LIMIT", "STOP ", "SL ", "STOPPED"]):
         return "Stop"
     if any(w in s for w in ["TIME", "TIME EXIT", "TIMED", "TIMEOUT", "DAILY"]):
         return "Time"
@@ -145,7 +147,6 @@ def normalize_symbol(sym: str) -> str:
 # =========================
 # Load & Clean (TOS Strategy Report)
 # =========================
-
 def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     with open(file_path, 'r', errors='replace') as f:
         lines = f.readlines()
@@ -207,7 +208,6 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
 # =========================
 # Build Trades (pair entries/exits)
 # =========================
-
 def build_trades(df: pd.DataFrame, commission_rt: float) -> Tuple[pd.DataFrame, int]:
     trades = []
     non_rth_trades = 0
@@ -229,10 +229,6 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> Tuple[pd.DataFrame, 
                 unpaired_count += 1
                 continue
             entry_time = entry['Date'] if pd.notna(entry['Date']) else pd.NaT
-            if not _in_rth(entry_time):
-                non_rth_trades += 1
-                i += 2
-                continue
             entry_qty = _safe_num(entry.get('Qty'))
             qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
             direction = 'Unknown'
@@ -274,12 +270,10 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> Tuple[pd.DataFrame, 
             unpaired_count += 1
             i += 1
     if unpaired_count > 0:
-        warnings.warn(f"Found {unpaired_count} unpaired orders in the dataset. {len(df) - len(trades) * 2 - non_rth_trades * 2} orders were not included in trades.")
-    if non_rth_trades > 0:
-        warnings.warn(f"Excluded {non_rth_trades} non-RTH15 trades (outside 09:45–15:30 ET).")
+        warnings.warn(f"Found {unpaired_count} unpaired orders in the dataset.")
     t = pd.DataFrame(trades)
     if t.empty:
-        warnings.warn("No valid RTH15 trades constructed from the dataset.")
+        warnings.warn("No valid trades constructed from the dataset.")
         return t.assign(HoldMins=np.nan), non_rth_trades
     t = t.sort_values('ExitTime').reset_index(drop=True)
     t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
@@ -288,7 +282,6 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> Tuple[pd.DataFrame, 
 # =========================
 # Stop-loss correction
 # =========================
-
 def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.DataFrame:
     df = trades.copy()
     df['RawLossExceeds100'] = df['TradePL'] < -100.0
@@ -302,7 +295,6 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
 # =========================
 # Metrics
 # =========================
-
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str, non_rth_trades: int = 0) -> dict:
     if trades_df.empty:
         warnings.warn(f"Empty trades DataFrame for {scope_label}. Returning default metrics with NaN values.")
@@ -356,13 +348,13 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
             "longest_hold_mins": np.nan,
             "shortest_hold_mins": np.nan,
             "hold_distribution": {"0-15": 0, "15-60": 0, "60-180": 0, ">180": 0},
-            "session_counts": {"OPEN": 0, "LUNCH": 0, "CLOSING": 0, "OTHER": 0},
-            "session_expectancy": {"OPEN": np.nan, "LUNCH": np.nan, "CLOSING": np.nan, "OTHER": np.nan},
+            "session_counts": {"PREMARKET": 0, "OPEN": 0, "LUNCH": 0, "CLOSING": 0, "AFTER_HOURS": 0},
+            "session_expectancy": {"PREMARKET": np.nan, "OPEN": np.nan, "LUNCH": np.nan, "CLOSING": np.nan, "AFTER_HOURS": np.nan},
             "dow_metrics": {day: {"win_rate": np.nan, "net_pl": np.nan, "expectancy": np.nan} for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']},
             "expectancy_by_hold": {"0-15": np.nan, "15-60": np.nan, "60-180": np.nan, ">180": np.nan},
             "capital_efficiency": np.nan,
             "concentration_risk_pct": np.nan,
-            "day_part_expectancy": {"EARLY": np.nan, "MID": np.nan, "LATE": np.nan, "OTHER": np.nan},
+            "day_part_expectancy": {"PREMARKET": np.nan, "EARLY": np.nan, "MID": np.nan, "LATE": np.nan, "AFTER_HOURS": np.nan},
             "num_trades_bto": 0,
             "win_rate_bto_pct": np.nan,
             "net_profit_bto": np.nan,
@@ -462,7 +454,7 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     top_trades = pl_net.nlargest(top_10_pct_count).sum()
     concentration_risk = (top_trades / total_net * 100) if total_net != 0 else np.nan
     df['DayPart'] = df['ExitTime'].apply(_tag_day_part)
-    day_part_expectancy = df.groupby('DayPart')['AdjustedNetPL'].mean().reindex(['EARLY', 'MID', 'LATE', 'OTHER']).fillna(np.nan).to_dict()
+    day_part_expectancy = df.groupby('DayPart')['AdjustedNetPL'].mean().reindex(['PREMARKET', 'EARLY', 'MID', 'LATE', 'AFTER_HOURS']).fillna(np.nan).to_dict()
     df_bto = df[df['Direction'] == 'Long']
     df_sto = df[df['Direction'] == 'Short']
     num_trades_bto = len(df_bto)
@@ -562,7 +554,6 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
 # =========================
 # Visuals (ALL sessions by default)
 # =========================
-
 def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir: str, title_suffix: str = "ALL") -> None:
     os.makedirs(outdir, exist_ok=True)
     pl = trades_df['AdjustedNetPL'].fillna(0.0)
@@ -609,7 +600,6 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
 # =========================
 # Analytics Markdown Generation
 # =========================
-
 def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, non_rth_trades: int, outdir: str) -> None:
     os.makedirs(outdir, exist_ok=True)
     m = metrics
@@ -654,13 +644,13 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 **P/L Basis:** All KPIs computed on **SL-adjusted net P/L** (cap −${g('algo_params', {}).get('StopLossCap', 100.0):.2f} per trade including commissions).
 **Algorithm Parameters:**
 {algo_params_str}
-**Trades:** ALL = {int(g('num_trades_all', 0))} | RTH = {int(g('RTH_num_trades', 0))} | Non-RTH15 Excluded = {non_rth_trades} ({non_rth_pct:.2f}%)
-
-*Note: BTO = Buy to Open (Long), STO = Sell to Open (Short). Analysis focuses on RTH15 trades (09:45–15:30 ET).*
+**Trades:** ALL = {int(g('num_trades_all', 0))} | RTH15 = {int(g('num_trades_rth', 0))} | Non-RTH15 = {non_rth_trades} ({non_rth_pct:.2f}%)
+*Note: BTO = Buy to Open (Long), STO = Sell to Open (Short). Analysis includes Premarket45 (03:00–09:15 ET), RTH15 (09:45–15:30 ET), and after-hours trades.*
 ---
 ## Strategy Compliance
-- **Trades within RTH15 Window (09:45–15:30 ET):** {(1 - non_rth_pct/100)*100:.2f}% ({int(g('num_trades_all', 0))} trades)
-- **Non-RTH15 Trades Excluded:** {non_rth_trades} trades ({non_rth_pct:.2f}%)
+- **Trades within Premarket45 (03:00–09:15 ET):** {int(g('session_counts').get('PREMARKET', 0))} trades
+- **Trades within RTH15 (09:45–15:30 ET):** {int(g('num_trades_rth', 0))} trades
+- **Non-RTH15 Trades:** {non_rth_trades} trades ({non_rth_pct:.2f}%)
 - **Trades with Raw Loss > ${g('algo_params', {}).get('StopLossCap', 100.0):.2f} (before cap):** {_fmt(g('raw_loss_exceeds_100_pct'), pct=True)} ({g('raw_loss_exceeds_100_count')} trades)
 ---
 ## Key Performance Indicators — ALL Sessions
@@ -694,21 +684,21 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
   - = 20 Points: {g('stops_sto_eq_20_points')} trades ({_fmt(g('stops_sto_eq_20_points') / g('total_stops_sto') * 100 if g('total_stops_sto') > 0 else 0, pct=True)})
   - Average Stop Loss (Points): {_fmt_points(g('avg_stop_loss_sto_points'))}
 ---
-## RTH Snapshot (09:45–15:30 ET)
-- **Net Profit (RTH):** {_fmt(g('RTH_net_profit'))}
-- **Win Rate (RTH):** {_fmt(g('RTH_win_rate_pct'), pct=True)}
-- **Profit Factor (RTH):** {_fmt(g('RTH_profit_factor'), p=3)}
-- **Max Drawdown (RTH):** {_fmt(g('RTH_max_drawdown_dollars'))} ({_fmt(g('RTH_max_drawdown_pct'), pct=True)})
-- **Sharpe (Annualized, RTH):** {_fmt(g('RTH_sharpe_annualized'))}
-- **Total Trades (RTH):** {int(g('RTH_num_trades', 0))}
+## RTH15 Snapshot (09:45–15:30 ET)
+- **Net Profit (RTH15):** {_fmt(g('RTH_net_profit'))}
+- **Win Rate (RTH15):** {_fmt(g('RTH_win_rate_pct'), pct=True)}
+- **Profit Factor (RTH15):** {_fmt(g('RTH_profit_factor'), p=3)}
+- **Max Drawdown (RTH15):** {_fmt(g('RTH_max_drawdown_dollars'))} ({_fmt(g('RTH_max_drawdown_pct'), pct=True)})
+- **Sharpe (Annualized, RTH15):** {_fmt(g('RTH_sharpe_annualized'))}
+- **Total Trades (RTH15):** {int(g('RTH_num_trades', 0))}
 ---
-## Points-Based Analysis — RTH
+## Points-Based Analysis — RTH15
 - **Average Win (Points):** {_fmt_points(g('RTH_avg_win_points'))}
 - **Average Loss (Points):** {_fmt_points(g('RTH_avg_loss_points'))}
 - **Expectancy (Points):** {_fmt_points(g('RTH_expectancy_points'))}
 - **1% Target Success Rate (≥5 points):** {_fmt(g('RTH_success_rate_1pct'), pct=True)} ({int(g('RTH_success_rate_1pct') * g('RTH_num_trades') / 100) if not np.isnan(g('RTH_success_rate_1pct')) else 0} trades)
 ---
-## Stop-Loss Analysis — RTH
+## Stop-Loss Analysis — RTH15
 - **Total Stops Hit:** {g('RTH_total_stops')} trades
 - **Stops < 20 Points (< ${g('algo_params', {}).get('StopLossCap', 100.0):.2f}):** {g('RTH_stops_lt_20_points')} trades ({_fmt(g('RTH_stops_lt_20_points') / g('RTH_total_stops') * 100 if g('RTH_total_stops') > 0 else 0, pct=True)})
 - **Stops = 20 Points (= ${g('algo_params', {}).get('StopLossCap', 100.0):.2f}):** {g('RTH_stops_eq_20_points')} trades ({_fmt(g('RTH_stops_eq_20_points') / g('RTH_total_stops') * 100 if g('RTH_total_stops') > 0 else 0, pct=True)})
@@ -738,15 +728,17 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
   - >180 min: {int(g('hold_distribution').get('>180', 0))} trades
 ### Trade Frequency by Session
 - **Trade Counts by Session:**
+  - PREMARKET (03:00–09:15): {int(g('session_counts').get('PREMARKET', 0))} trades
   - OPEN (09:45–11:30): {int(g('session_counts').get('OPEN', 0))} trades
   - LUNCH (11:30–14:00): {int(g('session_counts').get('LUNCH', 0))} trades
   - CLOSING (14:00–15:30): {int(g('session_counts').get('CLOSING', 0))} trades
-  - OTHER: {int(g('session_counts').get('OTHER', 0))} trades
+  - AFTER HOURS: {int(g('session_counts').get('AFTER_HOURS', 0))} trades
 - **Expectancy by Session:**
+  - PREMARKET: {_fmt(g('session_expectancy').get('PREMARKET', np.nan))}
   - OPEN: {_fmt(g('session_expectancy').get('OPEN', np.nan))}
   - LUNCH: {_fmt(g('session_expectancy').get('LUNCH', np.nan))}
   - CLOSING: {_fmt(g('session_expectancy').get('CLOSING', np.nan))}
-  - OTHER: {_fmt(g('session_expectancy').get('OTHER', np.nan))}
+  - AFTER HOURS: {_fmt(g('session_expectancy').get('AFTER_HOURS', np.nan))}
 ### Day of Week Performance
 - **Monday:**
   - Win Rate: {_fmt(g('dow_metrics').get('Monday', {}).get('win_rate', np.nan), pct=True)}
@@ -780,10 +772,11 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 ### Concentration Risk
 - **% of Net Profit from Top 10% of Trades:** {_fmt(g('concentration_risk_pct'), pct=True)}
 ### Trade Outcome by Day Part
+- **Premarket (03:00–09:15):** {_fmt(g('day_part_expectancy').get('PREMARKET', np.nan))}
 - **Early (09:45–11:30):** {_fmt(g('day_part_expectancy').get('EARLY', np.nan))}
 - **Mid (11:30–14:00):** {_fmt(g('day_part_expectancy').get('MID', np.nan))}
 - **Late (14:00–15:30):** {_fmt(g('day_part_expectancy').get('LATE', np.nan))}
-- **Other:** {_fmt(g('day_part_expectancy').get('OTHER', np.nan))}
+- **After Hours:** {_fmt(g('day_part_expectancy').get('AFTER_HOURS', np.nan))}
 ---
 ## Performance by Direction
 - **BTO Trades**:
@@ -828,20 +821,16 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 # =========================
 # Run Backtest for Instrument
 # =========================
-
 def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str], cfg: BacktestConfig, csv_stem: str):
-    if not callable(run_backtest_for_instrument):
-        raise NameError("run_backtest_for_instrument is not defined")
-    strategy_label = df_raw['BaseStrategy'].dropna().iloc[0] if 'BaseStrategy' in df_raw.columns and len(df_raw.dropna(subset=['BaseStrategy'])) else (cfg.strategy_name or 'Unknown')
+    cfg.strategy_name = Path(csv_stem).stem  # Use CSV file name as strategy name
     instr = normalize_symbol(instrument or '/UNK')
-    cfg.strategy_name = strategy_label
     pv = cfg.point_value
     if instr.upper() in {'/MES', 'MES'}:
         pv = 5.0
     elif instr.upper() in {'/MNQ', 'MNQ'}:
         pv = 2.0
     cfg.point_value = pv
-    outdir = cfg.outdir(csv_stem, instr, strategy_label)
+    outdir = cfg.outdir(csv_stem, instr, cfg.strategy_name)
     os.makedirs(outdir, exist_ok=True)
     trades_all, non_rth_trades = build_trades(df_raw, cfg.commission_per_round_trip)
     def _session_dt(row):
@@ -853,10 +842,11 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     trades_all.to_csv(trades_out, index=False)
     def _rth_row(row):
         t = row['EntryTime'] if pd.notna(row['EntryTime']) else row.get('ExitTime')
-        return _in_rth(t)
+        t_time = t.time()
+        return time(9, 45) <= t_time <= time(15, 30)
     trades_rth = trades_all[trades_all.apply(_rth_row, axis=1)].copy()
     metrics_all = compute_metrics(trades_all, cfg, scope_label="ALL", non_rth_trades=non_rth_trades)
-    metrics_all["strategy_name"] = strategy_label
+    metrics_all["strategy_name"] = cfg.strategy_name
     metrics_all["instrument"] = instr
     metrics_all["num_trades_all"] = int(len(trades_all))
     metrics_all["num_trades_rth"] = int(len(trades_rth))
@@ -875,7 +865,6 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
 # =========================
 # Main runner
 # =========================
-
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(tos_csv_path).stem.replace(' ', '_')
     raw = load_tos_strategy_report(tos_csv_path)
@@ -898,7 +887,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
 
 if __name__ == "__main__":
     import argparse, glob, sys
-    parser = argparse.ArgumentParser(description="Lean analysis of TOS Strategy Report CSV for SuperSignal_v7_RTH15_v4.3. RTH sessions only (09:45–15:30 ET).")
+    parser = argparse.ArgumentParser(description="Lean analysis of TOS Strategy Report CSV for MaxAlgo_v1_SupSig_v7. Includes Premarket45 (03:00–09:15 ET) and RTH15 (09:45–15:30 ET).")
     parser.add_argument(
         "--csv",
         nargs="+",
@@ -928,7 +917,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.5.0",
+        version="1.5.1",
     )
     all_metrics = []
     for csv_path in csv_paths:
@@ -938,5 +927,4 @@ if __name__ == "__main__":
             m = r["metrics"]
             m["csv"] = str(Path(csv_path).name)
             all_metrics.append(m)
-
-# End of Code
+```
