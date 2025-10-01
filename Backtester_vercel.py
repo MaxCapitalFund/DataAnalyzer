@@ -5,7 +5,7 @@
 # - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts
 # - Updates: Aligns with SuperSignal_v7_RTH15_v4.3, excludes non-RTH15 trades, uses BTO/STO terminology,
 #   includes points-based analysis with 1% target success rate, fixes session tagging,
-#   adds stop-loss analysis (total stops, <20 points, =20 points)
+#   adds stop-loss analysis, fixes NameError for max_dd_pct in empty DataFrame case
 # - Verified error-free on SuperSignal_RTH15_v7_v43_MES_100125.csv (382 orders → ~185 RTH trades)
 
 import os
@@ -37,7 +37,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.4.9"  # Updated for stop-loss analysis
+    version: str = "1.4.10"  # Updated for max_dd_pct fix
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path('/tmp')
@@ -399,6 +399,9 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     stops_sto_lt_20_points = int((sto_stop_mask & (df['AdjustedNetPL'] > -100.0)).sum()) if total_stops_sto > 0 else 0
     stops_sto_eq_20_points = int((sto_stop_mask & (df['AdjustedNetPL'] == -100.0)).sum()) if total_stops_sto > 0 else 0
     avg_stop_loss_sto_points = float(df[sto_stop_mask]['PointsPerContract'].mean()) if total_stops_sto > 0 else np.nan
+    max_dd_pct = abs(_max_drawdown(equity)) * 100.0 if not equity.empty else np.nan
+    max_dd_dollars = float((equity.cummax() - equity).max()) if not equity.empty else np.nan
+    recovery_factor = float(total_net / max_dd_dollars) if max_dd_dollars and max_dd_dollars != 0 else np.nan
     trade_rets = pl_net / cfg.initial_capital if cfg.initial_capital else pd.Series(np.nan, index=pl_net.index)
     std = trade_rets.std(ddof=1) if len(trade_rets) > 1 else np.nan
     per_trade_sharpe = float(trade_rets.mean() / std) if std and std > 0 else np.nan
@@ -617,7 +620,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
             return str(x)
     first_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').min()
     last_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').max()
-    instrument = g('instrument', '/UNK')
+    instrument = g('instrument', '/MES')
     total_trades_attempted = len(trades_all) + non_rth_trades
     non_rth_pct = (non_rth_trades / total_trades_attempted * 100) if total_trades_attempted > 0 else 0.0
     md = f"""
@@ -897,7 +900,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.4.9",
+        version="1.4.10",
     )
     all_metrics = []
     for csv_path in csv_paths:
