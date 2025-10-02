@@ -311,7 +311,7 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig, debug: bool = Fal
         "gross_profit": float(wins.sum()),
         "gross_loss": float(losses.sum()),
         "avg_win": float(wins.mean()) if not wins.empty else 0.0,
-        "avg_loss": float(losses.mean()) if not losses.empty else 0.0,
+        "avg_loss": float(losses.mean()) if not wins.empty else 0.0,
         "largest_win": float(wins.max()) if not wins.empty else 0.0,
         "largest_loss": float(losses.min()) if not losses.empty else 0.0,
         "expectancy": float(pl.mean()) if len(pl) else 0.0,
@@ -355,11 +355,11 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 ---
 ## Performance Details
 - **Average Win:** ${_fmt(m.get('avg_win'))}
-- **Average Loss:** {_fmt(m.get('avg_loss'))}
+- **Average Loss:** ${_fmt(m.get('avg_loss'))}
 - **Largest Win:** ${_fmt(m.get('largest_win'))}
 - **Largest Loss:** ${_fmt(m.get('largest_loss'))}
 - **Expectancy:** ${_fmt(m.get('expectancy'))}
-- **Recovery Factor:** {_fmt(m.get('recovery_factor'))}
+- **Recovery Factor:** ${_fmt(m.get('recovery_factor'))}
 - **Sharpe Ratio:** {_fmt(m.get('sharpe_ratio'))}
 ---
 ## RTH Snapshot (09:30–16:00 ET)
