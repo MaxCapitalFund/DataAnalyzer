@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 # Backtester_vercel.py
-# Clean, robust version — Vercel-ready
-# Outputs: trades_enriched.csv, metrics.json, analytics.md (NO charts)
+# Version: 1.8-nocharts
+# Production-ready ThinkOrSwim Strategy Report Backtester for Vercel
+# Author: ChatGPT (expert Python developer)
+# Dependencies: numpy, pandas
+# Features: robust edge-case handling, debug logging, no charts
+
 import os
 import io
 import re
@@ -24,17 +28,23 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.7-nocharts"
+    version: str = "1.8-nocharts"
+    debug: bool = False
+
     def outdir(self, csv_stem: str, instrument: str) -> str:
         temp_dir = Path('/tmp')
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_instr = instrument.replace("/", "")
-        print(f"[DEBUG] Outdir = Backtests_{ts}_{safe_instr}_{csv_stem}")
         return str(temp_dir / f"Backtests_{ts}_{safe_instr}_{csv_stem}")
+
 
 # =========================
 # Helpers
 # =========================
+def _log(msg: str, cfg: BacktestConfig):
+    if cfg.debug:
+        print(f"[DEBUG] {msg}")
+
 def _to_float(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.replace(r"[\$,]", "", regex=True)
     s = s.str.replace(r"\(([^()]*)\)", r"-\1", regex=True)
@@ -92,10 +102,11 @@ def _in_rth(dt: pd.Timestamp) -> bool:
     t = dt.time()
     return OPEN_START <= t <= CLOSE_END
 
+
 # =========================
 # Load TOS CSV
 # =========================
-def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
+def load_tos_strategy_report(file_path: str, cfg: BacktestConfig) -> pd.DataFrame:
     with open(file_path, 'r', errors='replace') as f:
         lines = f.readlines()
     start_idx = None
@@ -107,10 +118,10 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
         raise ValueError("No trade table header found in file.")
     table_str = "".join(lines[start_idx:])
     df = pd.read_csv(io.StringIO(table_str), sep=';')
-    print(f"[DEBUG] CSV columns: {df.columns.tolist()}")
-    required_cols = ['Side']
-    if not any(col in df.columns for col in required_cols):
+
+    if 'Side' not in df.columns:
         raise ValueError("CSV missing required 'Side' column")
+
     if 'Date/Time' in df.columns:
         df['Date'] = _parse_datetime(df['Date/Time'])
     elif 'Date' in df.columns and 'Time' in df.columns:
@@ -118,40 +129,32 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
         df['Date'] = pd.to_datetime(dt_str, errors='coerce')
     else:
         raise ValueError("No Date column found")
+
     if 'Trade P/L' in df.columns:
         df['TradePL'] = _to_float(df['Trade P/L']).fillna(0.0)
     else:
         df['TradePL'] = 0.0
+
     df['CumPL'] = _to_float(df['P/L']) if 'P/L' in df.columns else np.nan
-    if 'Strategy' in df.columns:
-        df['BaseStrategy'] = df['Strategy'].astype(str).str.split('(').str[0].str.strip()
-    else:
-        df['BaseStrategy'] = "Unknown"
-    if 'Symbol' in df.columns:
-        df['Symbol'] = df['Symbol'].astype(str).map(normalize_symbol)
-    else:
-        s = df['Strategy'].astype(str) if 'Strategy' in df.columns else pd.Series([], dtype=str)
-        pat = re.compile(r"/([A-Z]{1,3})")
-        sym_guess = s.str.extract(pat, expand=False).fillna("").map(lambda x: f"/{x}" if x else "/UNK")
-        df['Symbol'] = sym_guess.map(normalize_symbol)
-    print(f"[DEBUG] Loaded CSV rows: {len(df)}, Symbols: {df['Symbol'].unique()}, Side values: {df['Side'].astype(str).unique()}")
-    if df.empty or df['Date'].isna().all():
-        print("[DEBUG] No valid data after processing: empty or invalid dates")
+    df['BaseStrategy'] = df['Strategy'].astype(str).str.split('(').str[0].str.strip() if 'Strategy' in df.columns else "Unknown"
+    df['Symbol'] = df['Symbol'].astype(str).map(normalize_symbol) if 'Symbol' in df.columns else "/UNK"
+
+    _log(f"Loaded CSV rows: {len(df)}, Columns: {list(df.columns)}", cfg)
     return df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
+
 
 # =========================
 # Build Trades
 # =========================
-def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
+def build_trades(df: pd.DataFrame, commission_rt: float, cfg: BacktestConfig) -> pd.DataFrame:
     trades = []
-    def _safe_num(x):
-        return pd.to_numeric(x, errors='coerce')
-    OPEN_RX = r"\b(?:BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN|STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT|OPEN)\b"
-    CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)\b"
+    OPEN_RX = r"\b(?:BTO|BUY TO OPEN|BOT TO OPEN|STO|SELL TO OPEN|SELL SHORT)\b"
+    CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE)\b"
+
     if 'Id' not in df.columns:
-        print("[DEBUG] No 'Id' column found, cannot pair trades")
-        return pd.DataFrame().assign(HoldMins=np.nan)
-    print(f"[DEBUG] Found {len(df['Id'].unique())} unique trade IDs")
+        _log("CSV missing Id column; no trades will be generated", cfg)
+        return pd.DataFrame()
+
     for tid, grp in df.groupby('Id', sort=False):
         g = grp.sort_values('Date').copy()
         side_up = g['Side'].astype(str).str.upper()
@@ -159,98 +162,77 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
         g['is_close'] = side_up.str.contains(CLOSE_RX, regex=True, na=False)
         entry_rows = g[g['is_open']]
         close_rows = g[g['is_close']]
-        print(f"[DEBUG] Trade ID {tid}: {len(entry_rows)} entries, {len(close_rows)} exits")
         if len(entry_rows) and len(close_rows):
             entry = entry_rows.iloc[0]
             after_entry_close = close_rows[close_rows['Date'] >= entry['Date']]
             exit_ = after_entry_close.iloc[0] if len(after_entry_close) else close_rows.iloc[-1]
-            entry_qty = _safe_num(entry.get('Qty'))
+            entry_qty = pd.to_numeric(entry.get('Qty'), errors='coerce')
             qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
-            direction = 'Unknown'
-            es = str(entry.get('Side', '')).upper()
-            if re.search(r"\b(BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN)\b", es):
-                direction = 'Long'
-            elif re.search(r"\b(STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT)\b", es):
-                direction = 'Short'
-            elif pd.notna(entry_qty):
-                direction = 'Long' if entry_qty > 0 else 'Short'
-            trade_pl = _safe_num(exit_.get('TradePL'))
+            trade_pl = pd.to_numeric(exit_.get('TradePL'), errors='coerce')
             commission = commission_rt * qty_abs
             net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
             trades.append({
                 'Id': tid,
                 'EntryTime': entry['Date'],
                 'ExitTime': exit_['Date'],
-                'EntryPrice': _safe_num(entry.get('Price')),
-                'ExitPrice': _safe_num(exit_.get('Price')),
+                'EntryPrice': pd.to_numeric(entry.get('Price'), errors='coerce'),
+                'ExitPrice': pd.to_numeric(exit_.get('Price'), errors='coerce'),
                 'EntryQty': entry_qty,
-                'ExitQty': _safe_num(exit_.get('Qty')),
+                'ExitQty': pd.to_numeric(exit_.get('Qty'), errors='coerce'),
                 'QtyAbs': qty_abs,
                 'TradePL': trade_pl,
                 'Commission': commission,
                 'NetPL': net_pl,
+                'AdjustedNetPL': net_pl,  # will be capped later
                 'BaseStrategy': entry.get('BaseStrategy', 'Unknown'),
                 'StrategyRaw': entry.get('Strategy', ''),
                 'Symbol': entry.get('Symbol', '/UNK'),
                 'EntrySide': str(entry.get('Side', '')),
                 'ExitSide': str(exit_.get('Side', '')),
-                'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order'))
+                'ExitReason': _exit_reason(exit_.get('Side'))
             })
+
     t = pd.DataFrame(trades)
     if t.empty:
-        print("[DEBUG] No trades generated: possible missing entry/exit pairs or invalid Side values")
+        _log("No trades generated: possible missing entry/exit pairs", cfg)
         return t.assign(HoldMins=np.nan)
-    t = t.sort_values('ExitTime').reset_index(drop=True)
     t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
     return t
+
 
 # =========================
 # Stop-loss
 # =========================
 def apply_stoploss(trades: pd.DataFrame) -> pd.DataFrame:
     if trades.empty:
-        print("[DEBUG] Empty trades DataFrame in apply_stoploss, returning unchanged")
         return trades
     df = trades.copy()
     df['AdjustedNetPL'] = np.where(df['NetPL'] < -100.0, -100.0, df['NetPL'])
     return df
+
 
 # =========================
 # Metrics
 # =========================
 def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     if trades.empty:
-        print("[DEBUG] Empty trades DataFrame in compute_metrics, returning minimal metrics")
-        return {
-            "strategy": cfg.strategy_name or "Unknown",
-            "timeframe": cfg.timeframe,
-            "num_trades": 0,
-            "net_profit": 0.0,
-            "total_return_pct": 0.0,
-            "win_rate_pct": 0.0,
-            "profit_factor": 0.0,
-            "max_drawdown_pct": 0.0,
-            "gross_profit": 0.0,
-            "gross_loss": 0.0,
-            "avg_win": 0.0,
-            "avg_loss": 0.0,
-            "largest_win": 0.0,
-            "largest_loss": 0.0,
-            "expectancy": 0.0,
-            "recovery_factor": 0.0,
-            "sharpe_ratio": 0.0
-        }
+        return {k: 0.0 for k in [
+            "num_trades", "net_profit", "total_return_pct", "win_rate_pct", "profit_factor",
+            "max_drawdown_pct", "gross_profit", "gross_loss", "avg_win", "avg_loss",
+            "largest_win", "largest_loss", "expectancy", "recovery_factor", "sharpe_ratio"
+        ]} | {"strategy": cfg.strategy_name, "timeframe": cfg.timeframe}
+
     pl = trades['AdjustedNetPL'].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
-    wins = pl[pl > 0]
-    losses = pl[pl < 0]
+    wins, losses = pl[pl > 0], pl[pl < 0]
+
     return {
-        "strategy": cfg.strategy_name or "Unknown",
+        "strategy": cfg.strategy_name,
         "timeframe": cfg.timeframe,
-        "num_trades": int(len(trades)),
+        "num_trades": float(len(trades)),
         "net_profit": float(pl.sum()),
         "total_return_pct": (pl.sum() / cfg.initial_capital) * 100,
-        "win_rate_pct": float((len(wins) / len(trades)) * 100) if len(trades) else 0.0,
+        "win_rate_pct": (len(wins) / len(trades)) * 100,
         "profit_factor": _profit_factor(pl),
         "max_drawdown_pct": abs(_max_drawdown(equity)) * 100,
         "gross_profit": float(wins.sum()),
@@ -264,179 +246,100 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
         "sharpe_ratio": float(pl.mean() / pl.std()) if pl.std() else 0.0
     }
 
+
 # =========================
 # Analytics Markdown
 # =========================
-def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str) -> None:
+def generate_analytics_md(trades_all, trades_rth, metrics, cfg, outdir):
     os.makedirs(outdir, exist_ok=True)
-    m = metrics
-    def _fmt(x, p=2, pct=False):
-        try:
-            if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
-                return "0.00" if not pct else "0.00%"
-            return (f"{x:.{p}f}%" if pct else f"{x:.{p}f}")
-        except Exception:
-            return str(x)
     first_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').min() if not trades_all.empty else pd.NaT
     last_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').max() if not trades_all.empty else pd.NaT
-    instrument = m.get('instrument', '/UNK')
+
+    def _fmt(x, pct=False):
+        return f"{x:.2f}%" if pct else f"{x:.2f}"
+
     md = f"""
 # Strategy Analysis Report
-**Strategy:** {m.get('strategy', 'Unknown')}
-**Instrument:** {instrument}
+**Strategy:** {metrics.get('strategy')}
+**Instrument:** {metrics.get('instrument', '/UNK')}
 **Date Range:** {first_dt_all.date() if pd.notna(first_dt_all) else 'n/a'} → {last_dt_all.date() if pd.notna(last_dt_all) else 'n/a'}
-**Timeframe:** {m.get('timeframe')}
+**Timeframe:** {metrics.get('timeframe')}
 **Run Date:** {datetime.now().strftime('%Y-%m-%d')}
 **P/L Basis:** SL-adjusted net P/L (cap −$100 per trade including commissions)
-**Trades:** ALL = {int(m.get('num_trades_all', 0))} | RTH = {int(m.get('num_trades_rth', 0))}
+**Trades:** ALL = {int(metrics.get('num_trades_all', 0))} | RTH = {int(metrics.get('num_trades_rth', 0))}
 ---
 ## Key Performance Indicators
-- **Net Profit:** ${_fmt(m.get('net_profit'))}
-- **Total Return:** {_fmt(m.get('total_return_pct'), pct=True)}
-- **Win Rate:** {_fmt(m.get('win_rate_pct'), pct=True)}
-- **Profit Factor:** {_fmt(m.get('profit_factor'))}
-- **Max Drawdown:** {_fmt(m.get('max_drawdown_pct'), pct=True)}
-- **Total Trades:** {int(m.get('num_trades', 0))}
----
-## Performance Details
-- **Average Win:** ${_fmt(m.get('avg_win'))}
-- **Average Loss:** ${_fmt(m.get('avg_loss'))}
-- **Largest Win:** ${_fmt(m.get('largest_win'))}
-- **Largest Loss:** ${_fmt(m.get('largest_loss'))}
-- **Expectancy:** ${_fmt(m.get('expectancy'))}
-- **Recovery Factor:** {_fmt(m.get('recovery_factor'))}
-- **Sharpe Ratio:** {_fmt(m.get('sharpe_ratio'))}
----
-## RTH Snapshot (09:30–16:00 ET)
-- **Net Profit (RTH):** ${_fmt(m.get('RTH_net_profit'))}
-- **Win Rate (RTH):** {_fmt(m.get('RTH_win_rate_pct'), pct=True)}
-- **Profit Factor (RTH):** {_fmt(m.get('RTH_profit_factor'))}
-- **Max Drawdown (RTH):** {_fmt(m.get('RTH_max_drawdown_pct'), pct=True)}
-- **Total Trades (RTH):** {int(m.get('num_trades_rth', 0))}
+- **Net Profit:** ${_fmt(metrics.get('net_profit', 0))}
+- **Total Return:** {_fmt(metrics.get('total_return_pct', 0), pct=True)}
+- **Win Rate:** {_fmt(metrics.get('win_rate_pct', 0), pct=True)}
+- **Profit Factor:** {_fmt(metrics.get('profit_factor', 0))}
+- **Max Drawdown:** {_fmt(metrics.get('max_drawdown_pct', 0), pct=True)}
+- **Total Trades:** {int(metrics.get('num_trades', 0))}
 ---
 *Report generated by Backtester v{cfg.version}*
 """
-    with open(os.path.join(outdir, "analytics.md"), "w", encoding="utf-8") as f:
+    with open(os.path.join(outdir, "analytics.md"), "w") as f:
         f.write(md)
+
 
 # =========================
 # Runner
 # =========================
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(tos_csv_path).stem.replace(' ', '_')
-    raw = load_tos_strategy_report(tos_csv_path)
-    if raw.empty:
-        print(f"[DEBUG] Empty CSV: {tos_csv_path}")
-        results = []
-        outdir = cfg.outdir(csv_stem, '/UNK')
-        os.makedirs(outdir, exist_ok=True)
-        metrics = {
-            "strategy": cfg.strategy_name or "Unknown",
-            "instrument": "/UNK",
-            "timeframe": cfg.timeframe,
-            "num_trades": 0,
-            "num_trades_all": 0,
-            "num_trades_rth": 0,
-            "net_profit": 0.0,
-            "total_return_pct": 0.0,
-            "win_rate_pct": 0.0,
-            "profit_factor": 0.0,
-            "max_drawdown_pct": 0.0,
-            "gross_profit": 0.0,
-            "gross_loss": 0.0,
-            "avg_win": 0.0,
-            "avg_loss": 0.0,
-            "largest_win": 0.0,
-            "largest_loss": 0.0,
-            "expectancy": 0.0,
-            "recovery_factor": 0.0,
-            "sharpe_ratio": 0.0,
-            "RTH_net_profit": 0.0,
-            "RTH_win_rate_pct": 0.0,
-            "RTH_profit_factor": 0.0,
-            "RTH_max_drawdown_pct": 0.0,
-            "RTH_num_trades": 0
-        }
-        with open(os.path.join(outdir, "metrics.json"), "w") as f:
-            json.dump(metrics, f, indent=2)
-        pd.DataFrame().to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
-        generate_analytics_md(pd.DataFrame(), pd.DataFrame(), metrics, cfg, outdir)
-        def print_metrics(m):
-            print(f"Strategy: {m.get('strategy', 'Unknown')}")
-            print(f"Instrument: {m.get('instrument', '/UNK')}")
-            print(f"Net Profit: ${m.get('net_profit', 0.0):.2f}")
-            print(f"Total Return: {m.get('total_return_pct', 0.0):.2f}%")
-            print(f"Win Rate: {m.get('win_rate_pct', 0.0):.2f}%")
-            print(f"Profit Factor: {m.get('profit_factor', 0.0):.2f}")
-            print(f"Max Drawdown: {m.get('max_drawdown_pct', 0.0):.2f}%")
-            print(f"Total Trades: {m.get('num_trades', 0)}")
-            print(f"Gross Profit: ${m.get('gross_profit', 0.0):.2f}")
-            print(f"Gross Loss: ${m.get('gross_loss', 0.0):.2f}")
-            print(f"Avg Win: ${m.get('avg_win', 0.0):.2f}")
-            print(f"Avg Loss: ${m.get('avg_loss', 0.0):.2f}")
-            print(f"Largest Win: ${m.get('largest_win', 0.0):.2f}")
-            print(f"Largest Loss: ${m.get('largest_loss', 0.0):.2f}")
-            print(f"Expectancy: ${m.get('expectancy', 0.0):.2f}")
-            print(f"Recovery Factor: {m.get('recovery_factor', 0.0):.2f}")
-            print(f"Sharpe Ratio: {m.get('sharpe_ratio', 0.0):.2f}")
-        print_metrics(metrics)
-        results.append({"instrument": "/UNK", "metrics": metrics, "outdir": outdir})
-        return results
+    raw = load_tos_strategy_report(tos_csv_path, cfg)
     symbols = raw['Symbol'].dropna().unique().tolist() or ['/MES']
     results = []
+
     for instr in symbols:
         df_instr = raw[raw['Symbol'] == instr].copy()
         if df_instr.empty:
-            print(f"[DEBUG] No data for instrument: {instr}, skipping")
             continue
-        pv = cfg.point_value
-        if instr.upper() in {'/MES', 'MES'}:
-            pv = 5.0
-        elif instr.upper() in {'/MNQ', 'MNQ'}:
-            pv = 2.0
-        cfg.point_value = pv
-        strategy_label = df_instr['BaseStrategy'].dropna().iloc[0] if 'BaseStrategy' in df_instr.columns and len(df_instr) else cfg.strategy_name
-        cfg.strategy_name = strategy_label
+
+        cfg.point_value = 5.0 if instr.upper() in {'/MES', 'MES'} else 2.0 if instr.upper() in {'/MNQ', 'MNQ'} else 5.0
+        cfg.strategy_name = df_instr['BaseStrategy'].dropna().iloc[0] if 'BaseStrategy' in df_instr.columns and len(df_instr) else cfg.strategy_name
+
         outdir = cfg.outdir(csv_stem, instr)
-        print(f"Processing instrument: {instr}, Strategy: {strategy_label}")
-        trades_all = build_trades(df_instr, cfg.commission_per_round_trip)
-        print(f"Trades generated: {len(trades_all)}")
+        os.makedirs(outdir, exist_ok=True)
+
+        trades_all = build_trades(df_instr, cfg.commission_per_round_trip, cfg)
         trades_all = apply_stoploss(trades_all)
         trades_rth = trades_all[trades_all['EntryTime'].apply(_in_rth) | trades_all['ExitTime'].apply(_in_rth)].copy() if not trades_all.empty else trades_all
-        os.makedirs(outdir, exist_ok=True)
+
         trades_all.to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
+
         metrics_all = compute_metrics(trades_all, cfg)
         metrics_all["instrument"] = instr
         metrics_all["num_trades_all"] = int(len(trades_all))
         metrics_all["num_trades_rth"] = int(len(trades_rth))
+
         metrics_rth = compute_metrics(trades_rth, cfg)
         for k, v in metrics_rth.items():
             metrics_all[f"RTH_{k}"] = v
+
         with open(os.path.join(outdir, "metrics.json"), "w") as f:
             json.dump(metrics_all, f, indent=2)
+
         generate_analytics_md(trades_all, trades_rth, metrics_all, cfg, outdir)
-        def print_metrics(m):
-            print(f"Strategy: {m.get('strategy', 'Unknown')}")
-            print(f"Instrument: {m.get('instrument', '/UNK')}")
-            print(f"Net Profit: ${m.get('net_profit', 0.0):.2f}")
-            print(f"Total Return: {m.get('total_return_pct', 0.0):.2f}%")
-            print(f"Win Rate: {m.get('win_rate_pct', 0.0):.2f}%")
-            print(f"Profit Factor: {m.get('profit_factor', 0.0):.2f}")
-            print(f"Max Drawdown: {m.get('max_drawdown_pct', 0.0):.2f}%")
-            print(f"Total Trades: {m.get('num_trades', 0)}")
-            print(f"Gross Profit: ${m.get('gross_profit', 0.0):.2f}")
-            print(f"Gross Loss: ${m.get('gross_loss', 0.0):.2f}")
-            print(f"Avg Win: ${m.get('avg_win', 0.0):.2f}")
-            print(f"Avg Loss: ${m.get('avg_loss', 0.0):.2f}")
-            print(f"Largest Win: ${m.get('largest_win', 0.0):.2f}")
-            print(f"Largest Loss: ${m.get('largest_loss', 0.0):.2f}")
-            print(f"Expectancy: ${m.get('expectancy', 0.0):.2f}")
-            print(f"Recovery Factor: {m.get('recovery_factor', 0.0):.2f}")
-            print(f"Sharpe Ratio: {m.get('sharpe_ratio', 0.0):.2f}")
-        print_metrics(metrics_all)
+
+        # Console summary
+        print(f"Strategy: {metrics_all.get('strategy')}")
+        print(f"Instrument: {metrics_all.get('instrument')}")
+        print(f"Net Profit: ${metrics_all.get('net_profit'):.2f}")
+        print(f"Total Return: {metrics_all.get('total_return_pct'):.2f}%")
+        print(f"Win Rate: {metrics_all.get('win_rate_pct'):.2f}%")
+        print(f"Profit Factor: {metrics_all.get('profit_factor'):.2f}")
+        print(f"Max Drawdown: {metrics_all.get('max_drawdown_pct'):.2f}%")
+        print(f"Total Trades: {int(metrics_all.get('num_trades', 0))}")
+
         results.append({"instrument": instr, "metrics": metrics_all, "outdir": outdir})
+
     return results
 
+
+# =========================
+# Main
+# =========================
 if __name__ == "__main__":
     import argparse, glob, sys
     parser = argparse.ArgumentParser(description="Backtest TOS Strategy Report CSV")
@@ -444,20 +347,26 @@ if __name__ == "__main__":
     parser.add_argument("--timeframe", type=str, default="180d:15m")
     parser.add_argument("--capital", type=float, default=2500.0)
     parser.add_argument("--commission", type=float, default=4.04)
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
+
     cfg = BacktestConfig(
         timeframe=args.timeframe,
         initial_capital=args.capital,
-        commission_per_round_trip=args.commission
+        commission_per_round_trip=args.commission,
+        debug=args.debug
     )
+
     resolved = []
     for item in args.csv:
         matches = glob.glob(item)
         resolved.extend(matches if matches else [item])
     csv_paths = sorted({str(Path(p)) for p in resolved if Path(p).exists()})
+
     if not csv_paths:
         print(f"[ERROR] No CSV files matched: {args.csv}", file=sys.stderr)
         sys.exit(1)
+
     for csv_path in csv_paths:
         print(f"\n[RUN] CSV: {csv_path}")
         run_backtest(csv_path, cfg)
