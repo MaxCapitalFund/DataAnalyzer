@@ -2,7 +2,7 @@
 # Backtester_vercel.py — Hybrid Backtester v1.5.3
 # Optimized for Vercel deployment
 # - Stop-loss cap: -$100 per trade per contract
-# - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts
+# - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, charts
 
 import os
 import io
@@ -16,7 +16,7 @@ from typing import Tuple, Optional
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend
+matplotlib.use('Agg')  # headless backend
 import matplotlib.pyplot as plt
 
 # =========================
@@ -132,8 +132,7 @@ def normalize_symbol(sym: str) -> str:
     core = s[1:] if has_slash else s
     m = ROOT_RE.match(core.upper())
     if m:
-        root = m.group(1).upper()
-        return f"/{root}"
+        return f"/{m.group(1).upper()}"
     m2 = re.search(r"/([A-Za-z]{1,3})", s.upper())
     if m2:
         return f"/{m2.group(1)}"
@@ -141,7 +140,7 @@ def normalize_symbol(sym: str) -> str:
     return f"/{m3.group(1)}" if m3 else "/UNK"
 
 # =========================
-# Load & Clean TOS Strategy Report
+# Load & Clean Strategy Report
 # =========================
 def load_tos_strategy_report(file_path: str, cfg: BacktestConfig) -> pd.DataFrame:
     with open(file_path, 'r', errors='replace') as f:
@@ -155,6 +154,7 @@ def load_tos_strategy_report(file_path: str, cfg: BacktestConfig) -> pd.DataFram
         raise ValueError("No trade table header found.")
     table_str = "".join(lines[start_idx:])
     df = pd.read_csv(io.StringIO(table_str), sep=';')
+
     if 'Date/Time' in df.columns:
         df['Date'] = _parse_datetime(df['Date/Time'])
     elif 'Date' in df.columns and 'Time' in df.columns:
@@ -164,27 +164,33 @@ def load_tos_strategy_report(file_path: str, cfg: BacktestConfig) -> pd.DataFram
         df['Date'] = _parse_datetime(df['Date'])
     else:
         raise ValueError("No valid date column.")
+
     if 'Trade P/L' in df.columns:
         df['TradePL'] = _to_float(df['Trade P/L']).fillna(0.0)
     elif 'TradePL' in df.columns:
         df['TradePL'] = _to_float(df['TradePL']).fillna(0.0)
     else:
         df['TradePL'] = 0.0
+
     df['CumPL'] = _to_float(df['P/L']) if 'P/L' in df.columns else np.nan
     df['BaseStrategy'] = cfg.strategy_name
+
     side_col = None
     for cand in ['Side', 'Action', 'Order', 'Type']:
         if cand in df.columns:
             side_col = cand
             break
     df['Side'] = df[side_col].astype(str) if side_col else ""
+
     if 'Price' not in df.columns:
         df['Price'] = np.nan
+
     qty_col = 'Quantity' if 'Quantity' in df.columns else ('Qty' if 'Qty' in df.columns else None)
     if qty_col and qty_col != 'Qty':
         df['Qty'] = pd.to_numeric(df[qty_col], errors='coerce')
     elif 'Qty' not in df.columns:
         df['Qty'] = np.nan
+
     if 'Symbol' in df.columns:
         df['Symbol'] = df['Symbol'].astype(str).map(normalize_symbol)
     elif 'Instrument' in df.columns:
@@ -194,6 +200,7 @@ def load_tos_strategy_report(file_path: str, cfg: BacktestConfig) -> pd.DataFram
         pat = re.compile(r"/([A-Z]{1,3})")
         sym_guess = s.str.extract(pat, expand=False).fillna("").map(lambda x: f"/{x}" if x else "/UNK")
         df['Symbol'] = sym_guess.map(normalize_symbol)
+
     df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
     return df
 
@@ -203,16 +210,19 @@ def load_tos_strategy_report(file_path: str, cfg: BacktestConfig) -> pd.DataFram
 def build_trades(df: pd.DataFrame, commission_rt: float) -> Tuple[pd.DataFrame, int]:
     trades = []
     non_rth_trades = 0
+
     def _safe_num(x):
         return pd.to_numeric(x, errors='coerce')
+
     OPEN_RX = r"\b(?:BTO|BUY TO OPEN|STO|SELL TO OPEN|SELL SHORT|OPEN)\b"
     CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|BTC|BUY TO CLOSE|CLOSE)\b"
+
     i = 0
     while i < len(df) - 1:
-        entry = df.iloc[i]
-        exit_ = df.iloc[i + 1]
+        entry, exit_ = df.iloc[i], df.iloc[i + 1]
         side_entry = str(entry['Side']).upper().strip()
         side_exit = str(exit_['Side']).upper().strip()
+
         if re.search(OPEN_RX, side_entry) and re.search(CLOSE_RX, side_exit):
             entry_qty = _safe_num(entry.get('Qty'))
             qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
@@ -239,6 +249,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> Tuple[pd.DataFrame, 
             i += 2
         else:
             i += 1
+
     t = pd.DataFrame(trades)
     if t.empty:
         return t.assign(HoldMins=np.nan), non_rth_trades
@@ -265,7 +276,7 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
 
 # =========================
 # (compute_metrics, save_visuals_and_tables, generate_analytics_md)
-# ... [unchanged from your v1.5.2 code, safe to reuse]
+# — use your existing v1.5.2 bodies (unchanged)
 # =========================
 
 # =========================
@@ -277,25 +288,32 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
     cfg.point_value = 5.0 if instr.upper() in {'/MES', 'MES'} else (2.0 if instr.upper() in {'/MNQ', 'MNQ'} else cfg.point_value)
     outdir = cfg.outdir(csv_stem, instr, cfg.strategy_name)
     os.makedirs(outdir, exist_ok=True)
+
     trades_all, non_rth_trades = build_trades(df_raw, cfg.commission_per_round_trip)
     trades_all['Session'] = trades_all.apply(lambda r: _tag_session(r['EntryTime'] if pd.notna(r['EntryTime']) else r['ExitTime']), axis=1)
     trades_all = apply_stoploss_corrections(trades_all, cfg.point_value)
     trades_all.to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
+
     trades_rth = trades_all[trades_all['EntryTime'].dt.time.between(time(9,45), time(15,30))].copy()
     metrics_all = compute_metrics(trades_all, cfg, scope_label="ALL", non_rth_trades=non_rth_trades)
     metrics_all["strategy_name"] = cfg.strategy_name
     metrics_all["instrument"] = instr
     metrics_all["num_trades_all"] = int(len(trades_all))
     metrics_all["num_trades_rth"] = int(len(trades_rth))
+
     metrics_rth = compute_metrics(trades_rth, cfg, scope_label="RTH", non_rth_trades=non_rth_trades)
     for k, v in metrics_rth.items():
         metrics_all[f"RTH_{k}"] = v
+
     with open(os.path.join(outdir, "metrics.json"), "w") as f:
         json.dump(metrics_all, f, indent=2)
+
     save_visuals_and_tables(trades_all, cfg, outdir, title_suffix="ALL")
     generate_analytics_md(trades_all, trades_rth, metrics_all, cfg, non_rth_trades, outdir)
+
     with open(os.path.join(outdir, "config.json"), "w") as f:
         json.dump(asdict(cfg), f, indent=2)
+
     return trades_all, trades_rth, metrics_all, outdir
 
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
@@ -314,6 +332,8 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
 # =========================
 if __name__ == "__main__":
     import argparse, glob, sys
+    from pathlib import Path   # FIX: ensure Path is in scope
+
     parser = argparse.ArgumentParser(description="Analyze TOS Strategy Report CSVs with stop-loss cap.")
     parser.add_argument("--csv", nargs="+", required=True, help="Path(s) or globs for CSV(s).")
     parser.add_argument("--timeframe", type=str, default="180d:15m")
@@ -352,6 +372,7 @@ if __name__ == "__main__":
     consolidated = Path("/tmp") / f"metrics_consolidated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(consolidated, "w") as f:
         json.dump(all_metrics, f, indent=2)
+
     print(f"\n[DONE] {len(csv_paths)} CSV(s). Consolidated metrics: {consolidated}")
     sys.exit(0)
 
