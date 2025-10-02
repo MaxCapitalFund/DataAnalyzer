@@ -53,24 +53,6 @@ def _to_float(series: pd.Series) -> pd.Series:
 
 def _parse_datetime(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, format="%m/%d/%y %I:%M %p", errors='coerce')
-    # Try multiple datetime formats
-    formats = [
-        "%m/%d/%y %I:%M %p",  # Original format: 01/01/25 10:00 AM
-        "%Y-%m-%d %H:%M:%S",  # ISO format: 2025-01-01 10:00:00
-        "%m/%d/%Y %H:%M:%S",  # US format: 01/01/2025 10:00:00
-        "%Y-%m-%d %H:%M",     # ISO without seconds: 2025-01-01 10:00
-    ]
-    
-    for fmt in formats:
-        try:
-            result = pd.to_datetime(series, format=fmt, errors='coerce')
-            if not result.isna().all():
-                return result
-        except:
-            continue
-    
-    # Fallback to pandas auto-parsing
-    return pd.to_datetime(series, errors='coerce')
 
 # Session tags per spec
 PRE_START,  PRE_END  = time(3, 0),  time(9, 29)
@@ -200,11 +182,6 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
 
 def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
     id_col = 'Id' if 'Id' in df.columns else None
-    """
-    Build trades from ThinkorSwim data.
-    ThinkorSwim exports each order as a separate row with sequential IDs.
-    Each SELL order represents a completed trade with its P/L.
-    """
     trades = []
 
     def _safe_num(x):
@@ -267,51 +244,6 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                 })
 
     # Fallback: treat each close as a trade row
-    # Process each row - each SELL order is a completed trade
-    for _, row in df.iterrows():
-        side = str(row.get('Side', '')).upper()
-        
-        # Only process SELL orders (completed trades)
-        if 'SELL' in side:
-            trade_pl = _safe_num(row.get('Trade P/L', 0))
-            qty = _safe_num(row.get('Quantity', 1))
-            qty_abs = abs(qty) if pd.notna(qty) else 1.0
-            
-            # Calculate commission and net P/L
-            commission = commission_rt * qty_abs
-            net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
-            
-            # Determine direction based on P/L and quantity
-            if trade_pl > 0:
-                direction = "Long" if qty > 0 else "Short"
-            elif trade_pl < 0:
-                direction = "Long" if qty < 0 else "Short"
-            else:
-                direction = "Unknown"
-            
-            trades.append({
-                'Id': row.get('Id', np.nan),
-                'EntryTime': pd.NaT,  # We don't have entry time in this format
-                'ExitTime': row['Date'],
-                'EntryPrice': np.nan,  # We don't have entry price in this format
-                'ExitPrice': _safe_num(row.get('Price')),
-                'EntryQty': np.nan,
-                'ExitQty': qty,
-                'QtyAbs': qty_abs,
-                'TradePL': trade_pl,
-                'GrossPL': trade_pl,
-                'Commission': commission,
-                'NetPL': net_pl,
-                'BaseStrategy': row.get('BaseStrategy', 'Unknown'),
-                'StrategyRaw': row.get('Strategy', ''),
-                'Symbol': row.get('Symbol', ''),
-                'EntrySide': 'BUY',  # Assume BUY entry for SELL exit
-                'ExitSide': side,
-                'ExitReason': _exit_reason(side),
-                'Direction': direction,
-            })
-
-    # Fallback: if no SELL orders found, process all rows as individual trades
     if not trades:
         g = df.sort_values('Date').copy()
         side_up = g['Side'].astype(str).str.upper()
@@ -320,14 +252,8 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
             entry_qty = np.nan
             qty_abs = 1.0
             trade_pl = _safe_num(row.get('TradePL'))
-        for _, row in df.iterrows():
-            trade_pl = _safe_num(row.get('Trade P/L', 0))
-            qty = _safe_num(row.get('Quantity', 1))
-            qty_abs = abs(qty) if pd.notna(qty) else 1.0
-            
             commission = commission_rt * qty_abs
             net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
-            
             trades.append({
                 'Id': row.get('Id', np.nan),
                 'EntryTime': pd.NaT,
@@ -336,13 +262,9 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                 'ExitPrice': _safe_num(row.get('Price')),
                 'EntryQty': entry_qty,
                 'ExitQty': _safe_num(row.get('Qty')),
-                'EntryQty': np.nan,
-                'ExitQty': qty,
                 'QtyAbs': qty_abs,
                 'TradePL': _safe_num(row.get('TradePL')),
                 'GrossPL': _safe_num(row.get('TradePL')),
-                'TradePL': trade_pl,
-                'GrossPL': trade_pl,
                 'Commission': commission,
                 'NetPL': net_pl,
                 'BaseStrategy': row.get('BaseStrategy', 'Unknown'),
@@ -350,12 +272,10 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                 'Symbol': row.get('Symbol', ''),
                 'EntrySide': str(row.get('Side', '')),
                 'ExitSide':  str(row.get('Side', '')),
-                'ExitSide': str(row.get('Side', '')),
                 'ExitReason': _exit_reason(row.get('Side') or row.get('Type') or row.get('Order')),
                 'Direction': 'Unknown',
             })
 
-    # Create DataFrame and add hold time
     t = pd.DataFrame(trades)
     if t.empty:
         return t.assign(HoldMins=np.nan)
