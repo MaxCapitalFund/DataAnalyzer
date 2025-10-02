@@ -2,7 +2,6 @@
 # Backtester_vercel.py
 # Clean, robust version — Vercel-ready
 # Outputs: trades_enriched.csv, metrics.json, analytics.md (NO charts)
-
 import os
 import io
 import re
@@ -30,6 +29,7 @@ class BacktestConfig:
         temp_dir = Path('/tmp')
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_instr = instrument.replace("/", "")
+        print(f"[DEBUG] Outdir = Backtests_{ts}_{safe_instr}_{csv_stem}")
         return str(temp_dir / f"Backtests_{ts}_{safe_instr}_{csv_stem}")
 
 # =========================
@@ -107,6 +107,9 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
         raise ValueError("No trade table header found in file.")
     table_str = "".join(lines[start_idx:])
     df = pd.read_csv(io.StringIO(table_str), sep=';')
+    required_cols = ['Side']
+    if not any(col in df.columns for col in required_cols):
+        raise ValueError("CSV missing required 'Side' column")
     if 'Date/Time' in df.columns:
         df['Date'] = _parse_datetime(df['Date/Time'])
     elif 'Date' in df.columns and 'Time' in df.columns:
@@ -126,7 +129,11 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     if 'Symbol' in df.columns:
         df['Symbol'] = df['Symbol'].astype(str).map(normalize_symbol)
     else:
-        df['Symbol'] = "/UNK"
+        s = df['Strategy'].astype(str) if 'Strategy' in df.columns else pd.Series([], dtype=str)
+        pat = re.compile(r"/([A-Z]{1,3})")
+        sym_guess = s.str.extract(pat, expand=False).fillna("").map(lambda x: f"/{x}" if x else "/UNK")
+        df['Symbol'] = sym_guess.map(normalize_symbol)
+    print(f"[DEBUG] Loaded CSV rows: {len(df)}, Symbols: {df['Symbol'].unique()}")
     return df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
 
 # =========================
@@ -139,6 +146,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
     OPEN_RX = r"\b(?:BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN|STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT|OPEN)\b"
     CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)\b"
     if 'Id' in df.columns:
+        print(f"[DEBUG] Found {len(df['Id'].unique())} unique trade IDs")
         for tid, grp in df.groupby('Id', sort=False):
             g = grp.sort_values('Date').copy()
             side_up = g['Side'].astype(str).str.upper()
@@ -146,6 +154,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
             g['is_close'] = side_up.str.contains(CLOSE_RX, regex=True, na=False)
             entry_rows = g[g['is_open']]
             close_rows = g[g['is_close']]
+            print(f"[DEBUG] Trade ID {tid}: {len(entry_rows)} entries, {len(close_rows)} exits")
             if len(entry_rows) and len(close_rows):
                 entry = entry_rows.iloc[0]
                 after_entry_close = close_rows[close_rows['Date'] >= entry['Date']]
@@ -182,12 +191,21 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                     'ExitSide': str(exit_.get('Side', '')),
                     'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order'))
                 })
-    return pd.DataFrame(trades).sort_values('ExitTime').reset_index(drop=True)
+    t = pd.DataFrame(trades)
+    if t.empty:
+        print("[DEBUG] No trades generated: possible missing entry/exit pairs or invalid Side values")
+        return t.assign(HoldMins=np.nan)
+    t = t.sort_values('ExitTime').reset_index(drop=True)
+    t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
+    return t
 
 # =========================
 # Stop-loss
 # =========================
 def apply_stoploss(trades: pd.DataFrame) -> pd.DataFrame:
+    if trades.empty:
+        print("[DEBUG] Empty trades DataFrame in apply_stoploss, returning unchanged")
+        return trades
     df = trades.copy()
     df['AdjustedNetPL'] = np.where(df['NetPL'] < -100.0, -100.0, df['NetPL'])
     return df
@@ -197,6 +215,7 @@ def apply_stoploss(trades: pd.DataFrame) -> pd.DataFrame:
 # =========================
 def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     if trades.empty:
+        print("[DEBUG] Empty trades DataFrame in compute_metrics, returning minimal metrics")
         return {"strategy": cfg.strategy_name, "timeframe": cfg.timeframe, "num_trades": 0}
     pl = trades['AdjustedNetPL'].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
@@ -235,23 +254,19 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
             return (f"{x:.{p}f}%" if pct else f"{x:.{p}f}")
         except Exception:
             return str(x)
-    first_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').min()
-    last_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').max()
+    first_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').min() if not trades_all.empty else pd.NaT
+    last_dt_all = pd.to_datetime(trades_all['ExitTime'], errors='coerce').max() if not trades_all.empty else pd.NaT
     instrument = m.get('instrument', '/UNK')
     md = f"""
 # Strategy Analysis Report
-
-**Strategy:** {m.get('strategy', 'Unknown')}  
-**Instrument:** {instrument}  
-**Date Range:** {first_dt_all.date() if pd.notna(first_dt_all) else 'n/a'} → {last_dt_all.date() if pd.notna(last_dt_all) else 'n/a'}  
-**Timeframe:** {m.get('timeframe')}  
-**Run Date:** {datetime.now().strftime('%Y-%m-%d')}  
-**P/L Basis:** SL-adjusted net P/L (cap −$100 per trade including commissions)  
-
+**Strategy:** {m.get('strategy', 'Unknown')}
+**Instrument:** {instrument}
+**Date Range:** {first_dt_all.date() if pd.notna(first_dt_all) else 'n/a'} → {last_dt_all.date() if pd.notna(last_dt_all) else 'n/a'}
+**Timeframe:** {m.get('timeframe')}
+**Run Date:** {datetime.now().strftime('%Y-%m-%d')}
+**P/L Basis:** SL-adjusted net P/L (cap −$100 per trade including commissions)
 **Trades:** ALL = {int(m.get('num_trades_all', 0))} | RTH = {int(m.get('num_trades_rth', 0))}
-
 ---
-
 ## Key Performance Indicators
 - **Net Profit:** ${_fmt(m.get('net_profit'))}
 - **Total Return:** {_fmt(m.get('total_return_pct'), pct=True)}
@@ -259,9 +274,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Profit Factor:** {_fmt(m.get('profit_factor'))}
 - **Max Drawdown:** {_fmt(m.get('max_drawdown_pct'), pct=True)}
 - **Total Trades:** {int(m.get('num_trades', 0))}
-
 ---
-
 ## Performance Details
 - **Average Win:** ${_fmt(m.get('avg_win'))}
 - **Average Loss:** ${_fmt(m.get('avg_loss'))}
@@ -270,18 +283,14 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Expectancy:** ${_fmt(m.get('expectancy'))}
 - **Recovery Factor:** {_fmt(m.get('recovery_factor'))}
 - **Sharpe Ratio:** {_fmt(m.get('sharpe_ratio'))}
-
 ---
-
 ## RTH Snapshot (09:30–16:00 ET)
 - **Net Profit (RTH):** ${_fmt(m.get('RTH_net_profit'))}
 - **Win Rate (RTH):** {_fmt(m.get('RTH_win_rate_pct'), pct=True)}
 - **Profit Factor (RTH):** {_fmt(m.get('RTH_profit_factor'))}
 - **Max Drawdown (RTH):** {_fmt(m.get('RTH_max_drawdown_pct'), pct=True)}
 - **Total Trades (RTH):** {int(m.get('num_trades_rth', 0))}
-
 ---
-
 *Report generated by Backtester v{cfg.version}*
 """
     with open(os.path.join(outdir, "analytics.md"), "w", encoding="utf-8") as f:
@@ -298,6 +307,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     for instr in symbols:
         df_instr = raw[raw['Symbol'] == instr].copy()
         if df_instr.empty:
+            print(f"[DEBUG] No data for instrument: {instr}, skipping")
             continue
         pv = cfg.point_value
         if instr.upper() in {'/MES', 'MES'}:
@@ -312,7 +322,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
         trades_all = build_trades(df_instr, cfg.commission_per_round_trip)
         print(f"Trades generated: {len(trades_all)}")
         trades_all = apply_stoploss(trades_all)
-        trades_rth = trades_all[trades_all['EntryTime'].apply(_in_rth) | trades_all['ExitTime'].apply(_in_rth)].copy()
+        trades_rth = trades_all[trades_all['EntryTime'].apply(_in_rth) | trades_all['ExitTime'].apply(_in_rth)].copy() if not trades_all.empty else trades_all
         os.makedirs(outdir, exist_ok=True)
         trades_all.to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
         metrics_all = compute_metrics(trades_all, cfg)
