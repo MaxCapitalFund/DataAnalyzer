@@ -2,19 +2,20 @@
 # Backtester_vercel.py
 # Clean, robust version — Vercel-ready
 # Fixes trade pairing logic + metrics (no more N/A values)
+
 import os
 import io
 import re
 import json
-from dataclasses import dataclass, asdict
-from datetime import datetime, time  # Added for session tagging
+from dataclasses import dataclass
+from datetime import datetime, time
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')  # serverless safe
-import matplotlib.pyplot as plt  # Added for visuals
+import matplotlib.pyplot as plt  # visuals
 
 # =========================
 # Config
@@ -27,12 +28,14 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.6"
+    version: str = "1.6-final"
+
     def outdir(self, csv_stem: str, instrument: str) -> str:
         temp_dir = Path('/tmp')
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_instr = instrument.replace("/", "")
-        return str(temp_dir / f"Backtest_{ts}_{safe_instr}_{csv_stem}")
+        # ✅ Changed from Backtest_ → Backtests_
+        return str(temp_dir / f"Backtests_{ts}_{safe_instr}_{csv_stem}")
 
 # =========================
 # Helpers
@@ -71,9 +74,8 @@ def _exit_reason(text: str) -> str:
     if any(w in s for w in ["MANUAL", "FLATTEN", "MKT CLOSE", "DISCRETIONARY"]): return "Manual"
     return "Close"
 
-# Added: Symbol normalization
 def normalize_symbol(sym: str) -> str:
-    """Collapse variations like /MESU25 → /MES, MESZ4 → /MES; keep a leading slash."""
+    """Normalize contract codes like /MESU25 → /MES."""
     s = str(sym).strip()
     if not s:
         return "/UNK"
@@ -89,7 +91,6 @@ def normalize_symbol(sym: str) -> str:
     m3 = re.search(r"\b([A-Za-z]{1,3})\b", s.upper())
     return f"/{m3.group(1)}" if m3 else "/UNK"
 
-# Added: Session tagging for RTH filtering
 OPEN_START, CLOSE_END = time(9, 30), time(16, 0)
 def _in_rth(dt: pd.Timestamp) -> bool:
     if pd.isna(dt):
@@ -124,7 +125,6 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     else:
         df['TradePL'] = 0.0
     df['CumPL'] = _to_float(df['P/L']) if 'P/L' in df.columns else np.nan
-    # Added: Strategy base name and symbol normalization
     if 'Strategy' in df.columns:
         df['BaseStrategy'] = df['Strategy'].astype(str).str.split('(').str[0].str.strip()
     else:
@@ -158,7 +158,6 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                 exit_ = after_entry_close.iloc[0] if len(after_entry_close) else close_rows.iloc[-1]
                 entry_qty = _safe_num(entry.get('Qty'))
                 qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
-                # Improved: Direction logic
                 direction = 'Unknown'
                 es = str(entry.get('Side', '')).upper()
                 if re.search(r"\b(BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN)\b", es):
@@ -183,14 +182,14 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                     'GrossPL': trade_pl,
                     'Commission': commission,
                     'NetPL': net_pl,
-                    'BaseStrategy': entry.get('BaseStrategy', 'Unknown'),  # Added
-                    'StrategyRaw': entry.get('Strategy', ''),  # Added
-                    'Symbol': entry.get('Symbol', '/UNK'),  # Added
-                    'EntrySide': str(entry.get('Side', '')),  # Added
-                    'ExitSide': str(exit_.get('Side', '')),  # Added
-                    'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order'))  # Added
+                    'BaseStrategy': entry.get('BaseStrategy', 'Unknown'),
+                    'StrategyRaw': entry.get('Strategy', ''),
+                    'Symbol': entry.get('Symbol', '/UNK'),
+                    'EntrySide': str(entry.get('Side', '')),
+                    'ExitSide': str(exit_.get('Side', '')),
+                    'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order')),
+                    'Direction': direction
                 })
-    # Fallback: close-only rows
     if not trades:
         side_up = df['Side'].astype(str).str.upper()
         close_rows = df[side_up.str.contains(CLOSE_RX, regex=True, na=False)]
@@ -212,12 +211,12 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                 'GrossPL': trade_pl,
                 'Commission': commission,
                 'NetPL': net_pl,
-                'BaseStrategy': row.get('BaseStrategy', 'Unknown'),  # Added
-                'StrategyRaw': row.get('Strategy', ''),  # Added
-                'Symbol': row.get('Symbol', '/UNK'),  # Added
-                'EntrySide': str(row.get('Side', '')),  # Added
-                'ExitSide': str(row.get('Side', '')),  # Added
-                'ExitReason': _exit_reason(row.get('Side') or row.get('Type') or row.get('Order')),  # Added
+                'BaseStrategy': row.get('BaseStrategy', 'Unknown'),
+                'StrategyRaw': row.get('Strategy', ''),
+                'Symbol': row.get('Symbol', '/UNK'),
+                'EntrySide': str(row.get('Side', '')),
+                'ExitSide': str(row.get('Side', '')),
+                'ExitReason': _exit_reason(row.get('Side') or row.get('Type') or row.get('Order')),
                 'Direction': 'Unknown'
             })
     t = pd.DataFrame(trades)
@@ -265,12 +264,13 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
         "sharpe_ratio": float(pl.mean() / pl.std()) if pl.std() else 0.0
     }
 
-# Added: Visuals and Tables
+# =========================
+# Visuals and Markdown
+# =========================
 def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir: str, title_suffix: str = "ALL") -> None:
     os.makedirs(outdir, exist_ok=True)
     pl = trades_df['AdjustedNetPL'].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
-    # Equity curve
     plt.figure(figsize=(9, 4.5))
     plt.plot(equity.index, equity.values)
     plt.ylabel("Equity ($)")
@@ -279,7 +279,6 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"equity_curve_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
-    # Drawdown curve
     dd = equity / equity.cummax() - 1.0
     plt.figure(figsize=(9, 4.5))
     plt.plot(dd.index, dd.values * 100.0)
@@ -289,7 +288,6 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"drawdown_curve_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
-    # P/L histogram
     plt.figure(figsize=(9, 4.5))
     plt.hist(trades_df['AdjustedNetPL'].dropna().values, bins=30)
     plt.xlabel("Net P/L per Trade ($)")
@@ -298,14 +296,12 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"pl_histogram_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
     plt.close()
-    # Monthly performance
     dt = pd.to_datetime(trades_df['ExitTime'], errors='coerce')
     monthly = pd.DataFrame({'NetPL': trades_df['AdjustedNetPL'].values}, index=dt)
     monthly = monthly.dropna().resample('ME').sum()
     monthly['ReturnPct'] = monthly['NetPL'] / cfg.initial_capital * 100.0
     monthly.to_csv(os.path.join(outdir, f"monthly_performance_{title_suffix.lower()}.csv"))
 
-# Added: Analytics Markdown
 def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str) -> None:
     os.makedirs(outdir, exist_ok=True)
     m = metrics
@@ -374,41 +370,33 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
         f.write(md)
 
 # =========================
-# Runner (multi-instrument)
+# Runner
 # =========================
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(tos_csv_path).stem.replace(' ', '_')
     raw = load_tos_strategy_report(tos_csv_path)
-    # Added: Detect instruments
     symbols = raw['Symbol'].dropna().unique().tolist() or ['/MES']
     results = []
     for instr in symbols:
-        # Added: Filter by instrument
         df_instr = raw[raw['Symbol'] == instr].copy()
         if df_instr.empty:
             continue
-        # Added: Set point value based on instrument
         pv = cfg.point_value
         if instr.upper() in {'/MES', 'MES'}:
             pv = 5.0
         elif instr.upper() in {'/MNQ', 'MNQ'}:
             pv = 2.0
         cfg.point_value = pv
-        # Added: Strategy name from CSV
         strategy_label = df_instr['BaseStrategy'].dropna().iloc[0] if 'BaseStrategy' in df_instr.columns and len(df_instr) else cfg.strategy_name
         cfg.strategy_name = strategy_label
         outdir = cfg.outdir(csv_stem, instr)
-        # Added: Debug print
         print(f"Processing instrument: {instr}, Strategy: {strategy_label}")
         trades_all = build_trades(df_instr, cfg.commission_per_round_trip)
-        print(f"Trades generated: {len(trades_all)}")  # Debug print
+        print(f"Trades generated: {len(trades_all)}")
         trades_all = apply_stoploss(trades_all)
-        # Added: RTH subset
         trades_rth = trades_all[trades_all['EntryTime'].apply(_in_rth) | trades_all['ExitTime'].apply(_in_rth)].copy()
-        # Save trades
         os.makedirs(outdir, exist_ok=True)
         trades_all.to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
-        # Metrics
         metrics_all = compute_metrics(trades_all, cfg)
         metrics_all["instrument"] = instr
         metrics_all["num_trades_all"] = int(len(trades_all))
@@ -418,10 +406,8 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
             metrics_all[f"RTH_{k}"] = v
         with open(os.path.join(outdir, "metrics.json"), "w") as f:
             json.dump(metrics_all, f, indent=2)
-        # Added: Visuals and analytics
         save_visuals_and_tables(trades_all, cfg, outdir)
         generate_analytics_md(trades_all, trades_rth, metrics_all, cfg, outdir)
-        # Added: Pretty print metrics
         def print_metrics(m):
             print(f"Strategy: {m.get('strategy', 'Unknown')}")
             print(f"Instrument: {m.get('instrument', '/UNK')}")
@@ -444,6 +430,9 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
         results.append({"instrument": instr, "metrics": metrics_all, "outdir": outdir})
     return results
 
+# =========================
+# Main
+# =========================
 if __name__ == "__main__":
     import argparse, glob, sys
     parser = argparse.ArgumentParser(description="Backtest TOS Strategy Report CSV")
