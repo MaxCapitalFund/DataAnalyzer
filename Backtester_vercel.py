@@ -24,7 +24,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.6-nocharts"
+    version: str = "1.7-nocharts"
     def outdir(self, csv_stem: str, instrument: str) -> str:
         temp_dir = Path('/tmp')
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -107,6 +107,7 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
         raise ValueError("No trade table header found in file.")
     table_str = "".join(lines[start_idx:])
     df = pd.read_csv(io.StringIO(table_str), sep=';')
+    print(f"[DEBUG] CSV columns: {df.columns.tolist()}")
     required_cols = ['Side']
     if not any(col in df.columns for col in required_cols):
         raise ValueError("CSV missing required 'Side' column")
@@ -134,6 +135,8 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
         sym_guess = s.str.extract(pat, expand=False).fillna("").map(lambda x: f"/{x}" if x else "/UNK")
         df['Symbol'] = sym_guess.map(normalize_symbol)
     print(f"[DEBUG] Loaded CSV rows: {len(df)}, Symbols: {df['Symbol'].unique()}, Side values: {df['Side'].astype(str).unique()}")
+    if df.empty or df['Date'].isna().all():
+        print("[DEBUG] No valid data after processing: empty or invalid dates")
     return df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
 
 # =========================
@@ -145,52 +148,54 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
         return pd.to_numeric(x, errors='coerce')
     OPEN_RX = r"\b(?:BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN|STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT|OPEN)\b"
     CLOSE_RX = r"\b(?:STC|SELL TO CLOSE|SELL_TO_CLOSE|SLD TO CLOSE|BTC|BUY TO CLOSE|BUY_TO_CLOSE|CLOSE)\b"
-    if 'Id' in df.columns:
-        print(f"[DEBUG] Found {len(df['Id'].unique())} unique trade IDs")
-        for tid, grp in df.groupby('Id', sort=False):
-            g = grp.sort_values('Date').copy()
-            side_up = g['Side'].astype(str).str.upper()
-            g['is_open'] = side_up.str.contains(OPEN_RX, regex=True, na=False)
-            g['is_close'] = side_up.str.contains(CLOSE_RX, regex=True, na=False)
-            entry_rows = g[g['is_open']]
-            close_rows = g[g['is_close']]
-            print(f"[DEBUG] Trade ID {tid}: {len(entry_rows)} entries, {len(close_rows)} exits")
-            if len(entry_rows) and len(close_rows):
-                entry = entry_rows.iloc[0]
-                after_entry_close = close_rows[close_rows['Date'] >= entry['Date']]
-                exit_ = after_entry_close.iloc[0] if len(after_entry_close) else close_rows.iloc[-1]
-                entry_qty = _safe_num(entry.get('Qty'))
-                qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
-                direction = 'Unknown'
-                es = str(entry.get('Side', '')).upper()
-                if re.search(r"\b(BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN)\b", es):
-                    direction = 'Long'
-                elif re.search(r"\b(STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT)\b", es):
-                    direction = 'Short'
-                elif pd.notna(entry_qty):
-                    direction = 'Long' if entry_qty > 0 else 'Short'
-                trade_pl = _safe_num(exit_.get('TradePL'))
-                commission = commission_rt * qty_abs
-                net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
-                trades.append({
-                    'Id': tid,
-                    'EntryTime': entry['Date'],
-                    'ExitTime': exit_['Date'],
-                    'EntryPrice': _safe_num(entry.get('Price')),
-                    'ExitPrice': _safe_num(exit_.get('Price')),
-                    'EntryQty': entry_qty,
-                    'ExitQty': _safe_num(exit_.get('Qty')),
-                    'QtyAbs': qty_abs,
-                    'TradePL': trade_pl,
-                    'Commission': commission,
-                    'NetPL': net_pl,
-                    'BaseStrategy': entry.get('BaseStrategy', 'Unknown'),
-                    'StrategyRaw': entry.get('Strategy', ''),
-                    'Symbol': entry.get('Symbol', '/UNK'),
-                    'EntrySide': str(entry.get('Side', '')),
-                    'ExitSide': str(exit_.get('Side', '')),
-                    'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order'))
-                })
+    if 'Id' not in df.columns:
+        print("[DEBUG] No 'Id' column found, cannot pair trades")
+        return pd.DataFrame().assign(HoldMins=np.nan)
+    print(f"[DEBUG] Found {len(df['Id'].unique())} unique trade IDs")
+    for tid, grp in df.groupby('Id', sort=False):
+        g = grp.sort_values('Date').copy()
+        side_up = g['Side'].astype(str).str.upper()
+        g['is_open'] = side_up.str.contains(OPEN_RX, regex=True, na=False)
+        g['is_close'] = side_up.str.contains(CLOSE_RX, regex=True, na=False)
+        entry_rows = g[g['is_open']]
+        close_rows = g[g['is_close']]
+        print(f"[DEBUG] Trade ID {tid}: {len(entry_rows)} entries, {len(close_rows)} exits")
+        if len(entry_rows) and len(close_rows):
+            entry = entry_rows.iloc[0]
+            after_entry_close = close_rows[close_rows['Date'] >= entry['Date']]
+            exit_ = after_entry_close.iloc[0] if len(after_entry_close) else close_rows.iloc[-1]
+            entry_qty = _safe_num(entry.get('Qty'))
+            qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
+            direction = 'Unknown'
+            es = str(entry.get('Side', '')).upper()
+            if re.search(r"\b(BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN)\b", es):
+                direction = 'Long'
+            elif re.search(r"\b(STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT)\b", es):
+                direction = 'Short'
+            elif pd.notna(entry_qty):
+                direction = 'Long' if entry_qty > 0 else 'Short'
+            trade_pl = _safe_num(exit_.get('TradePL'))
+            commission = commission_rt * qty_abs
+            net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
+            trades.append({
+                'Id': tid,
+                'EntryTime': entry['Date'],
+                'ExitTime': exit_['Date'],
+                'EntryPrice': _safe_num(entry.get('Price')),
+                'ExitPrice': _safe_num(exit_.get('Price')),
+                'EntryQty': entry_qty,
+                'ExitQty': _safe_num(exit_.get('Qty')),
+                'QtyAbs': qty_abs,
+                'TradePL': trade_pl,
+                'Commission': commission,
+                'NetPL': net_pl,
+                'BaseStrategy': entry.get('BaseStrategy', 'Unknown'),
+                'StrategyRaw': entry.get('Strategy', ''),
+                'Symbol': entry.get('Symbol', '/UNK'),
+                'EntrySide': str(entry.get('Side', '')),
+                'ExitSide': str(exit_.get('Side', '')),
+                'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order'))
+            })
     t = pd.DataFrame(trades)
     if t.empty:
         print("[DEBUG] No trades generated: possible missing entry/exit pairs or invalid Side values")
@@ -216,7 +221,25 @@ def apply_stoploss(trades: pd.DataFrame) -> pd.DataFrame:
 def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     if trades.empty:
         print("[DEBUG] Empty trades DataFrame in compute_metrics, returning minimal metrics")
-        return {"strategy": cfg.strategy_name, "timeframe": cfg.timeframe, "num_trades": 0}
+        return {
+            "strategy": cfg.strategy_name or "Unknown",
+            "timeframe": cfg.timeframe,
+            "num_trades": 0,
+            "net_profit": 0.0,
+            "total_return_pct": 0.0,
+            "win_rate_pct": 0.0,
+            "profit_factor": 0.0,
+            "max_drawdown_pct": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "largest_win": 0.0,
+            "largest_loss": 0.0,
+            "expectancy": 0.0,
+            "recovery_factor": 0.0,
+            "sharpe_ratio": 0.0
+        }
     pl = trades['AdjustedNetPL'].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
     wins = pl[pl > 0]
@@ -250,7 +273,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
     def _fmt(x, p=2, pct=False):
         try:
             if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
-                return "n/a"
+                return "0.00" if not pct else "0.00%"
             return (f"{x:.{p}f}%" if pct else f"{x:.{p}f}")
         except Exception:
             return str(x)
@@ -282,13 +305,13 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Largest Loss:** ${_fmt(m.get('largest_loss'))}
 - **Expectancy:** ${_fmt(m.get('expectancy'))}
 - **Recovery Factor:** {_fmt(m.get('recovery_factor'))}
-- **Sharpe Ratio:** ${_fmt(m.get('sharpe_ratio'))}
+- **Sharpe Ratio:** {_fmt(m.get('sharpe_ratio'))}
 ---
 ## RTH Snapshot (09:30–16:00 ET)
 - **Net Profit (RTH):** ${_fmt(m.get('RTH_net_profit'))}
 - **Win Rate (RTH):** {_fmt(m.get('RTH_win_rate_pct'), pct=True)}
 - **Profit Factor (RTH):** {_fmt(m.get('RTH_profit_factor'))}
-- **Max Drawdown (RTH):** ${_fmt(m.get('RTH_max_drawdown_pct'), pct=True)}
+- **Max Drawdown (RTH):** {_fmt(m.get('RTH_max_drawdown_pct'), pct=True)}
 - **Total Trades (RTH):** {int(m.get('num_trades_rth', 0))}
 ---
 *Report generated by Backtester v{cfg.version}*
@@ -302,6 +325,63 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(tos_csv_path).stem.replace(' ', '_')
     raw = load_tos_strategy_report(tos_csv_path)
+    if raw.empty:
+        print(f"[DEBUG] Empty CSV: {tos_csv_path}")
+        results = []
+        outdir = cfg.outdir(csv_stem, '/UNK')
+        os.makedirs(outdir, exist_ok=True)
+        metrics = {
+            "strategy": cfg.strategy_name or "Unknown",
+            "instrument": "/UNK",
+            "timeframe": cfg.timeframe,
+            "num_trades": 0,
+            "num_trades_all": 0,
+            "num_trades_rth": 0,
+            "net_profit": 0.0,
+            "total_return_pct": 0.0,
+            "win_rate_pct": 0.0,
+            "profit_factor": 0.0,
+            "max_drawdown_pct": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "largest_win": 0.0,
+            "largest_loss": 0.0,
+            "expectancy": 0.0,
+            "recovery_factor": 0.0,
+            "sharpe_ratio": 0.0,
+            "RTH_net_profit": 0.0,
+            "RTH_win_rate_pct": 0.0,
+            "RTH_profit_factor": 0.0,
+            "RTH_max_drawdown_pct": 0.0,
+            "RTH_num_trades": 0
+        }
+        with open(os.path.join(outdir, "metrics.json"), "w") as f:
+            json.dump(metrics, f, indent=2)
+        pd.DataFrame().to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
+        generate_analytics_md(pd.DataFrame(), pd.DataFrame(), metrics, cfg, outdir)
+        def print_metrics(m):
+            print(f"Strategy: {m.get('strategy', 'Unknown')}")
+            print(f"Instrument: {m.get('instrument', '/UNK')}")
+            print(f"Net Profit: ${m.get('net_profit', 0.0):.2f}")
+            print(f"Total Return: {m.get('total_return_pct', 0.0):.2f}%")
+            print(f"Win Rate: {m.get('win_rate_pct', 0.0):.2f}%")
+            print(f"Profit Factor: {m.get('profit_factor', 0.0):.2f}")
+            print(f"Max Drawdown: {m.get('max_drawdown_pct', 0.0):.2f}%")
+            print(f"Total Trades: {m.get('num_trades', 0)}")
+            print(f"Gross Profit: ${m.get('gross_profit', 0.0):.2f}")
+            print(f"Gross Loss: ${m.get('gross_loss', 0.0):.2f}")
+            print(f"Avg Win: ${m.get('avg_win', 0.0):.2f}")
+            print(f"Avg Loss: ${m.get('avg_loss', 0.0):.2f}")
+            print(f"Largest Win: ${m.get('largest_win', 0.0):.2f}")
+            print(f"Largest Loss: ${m.get('largest_loss', 0.0):.2f}")
+            print(f"Expectancy: ${m.get('expectancy', 0.0):.2f}")
+            print(f"Recovery Factor: {m.get('recovery_factor', 0.0):.2f}")
+            print(f"Sharpe Ratio: {m.get('sharpe_ratio', 0.0):.2f}")
+        print_metrics(metrics)
+        results.append({"instrument": "/UNK", "metrics": metrics, "outdir": outdir})
+        return results
     symbols = raw['Symbol'].dropna().unique().tolist() or ['/MES']
     results = []
     for instr in symbols:
@@ -351,7 +431,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
             print(f"Largest Win: ${m.get('largest_win', 0.0):.2f}")
             print(f"Largest Loss: ${m.get('largest_loss', 0.0):.2f}")
             print(f"Expectancy: ${m.get('expectancy', 0.0):.2f}")
-            print(f"Recovery Factor: ${m.get('recovery_factor', 0.0):.2f}")
+            print(f"Recovery Factor: {m.get('recovery_factor', 0.0):.2f}")
             print(f"Sharpe Ratio: {m.get('sharpe_ratio', 0.0):.2f}")
         print_metrics(metrics_all)
         results.append({"instrument": instr, "metrics": metrics_all, "outdir": outdir})
