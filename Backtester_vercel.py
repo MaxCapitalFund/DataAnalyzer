@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # ==========================================================
-# Backtester_vercel.py v1.6.3 (Hardened Full Schema)
+# Backtester_vercel.py v1.6.4 (Hardened)
 # - Guarantees NetPL/AdjustedNetPL always exist
 # - Guarantees compute_metrics always returns full schema
-# - Fixes KeyError: 'net_profit'
+# - Defensive markdown generation (no more KeyErrors)
 # ==========================================================
 
-import os, io, re, json, argparse, glob, sys
+import os, io, json, argparse, glob, sys
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +28,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.6.3"
+    version: str = "1.6.4"
     algo_params: dict = None
     def __post_init__(self):
         if self.algo_params is None:
@@ -184,7 +184,7 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float):
 # Compute Metrics (always full schema)
 # =========================
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str, non_rth_trades=0):
-    # ✅ full schema defaults
+    # Full schema defaults
     metrics = {
         "scope": scope_label,
         "strategy_name": cfg.strategy_name,
@@ -235,9 +235,15 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     plt.savefig(os.path.join(outdir,f"equity_curve_{title_suffix}.png")); plt.close()
 
 # =========================
-# Markdown Report
+# Markdown Report (defensive)
 # =========================
 def generate_analytics_md(trades_all, trades_rth, metrics, cfg, non_rth_trades, outdir):
+    required = ["net_profit","num_trades","win_rate_pct","profit_factor",
+                "expectancy","max_drawdown_pct","sharpe_ratio",
+                "stoploss_hits","avg_hold_mins"]
+    for k in required:
+        if k not in metrics: metrics[k]=0.0
+
     md = [
         f"# Strategy Report ({cfg.version})",
         f"**Trades:** {metrics['num_trades']}",
@@ -250,7 +256,8 @@ def generate_analytics_md(trades_all, trades_rth, metrics, cfg, non_rth_trades, 
         f"**Stop-Loss Hits:** {metrics['stoploss_hits']}",
         f"**Avg Hold (mins):** {metrics['avg_hold_mins']:.1f}",
     ]
-    with open(os.path.join(outdir,"analytics.md"),"w") as f: f.write("\n".join(md))
+    with open(os.path.join(outdir,"analytics.md"),"w") as f:
+        f.write("\n".join(md))
 
 # =========================
 # Run Backtest
@@ -321,5 +328,5 @@ if __name__=="__main__":
     sys.exit(0)
 
 # =========================
-# End of Backtester_vercel.py v1.6.3
+# End of Backtester_vercel.py v1.6.4
 # =========================
