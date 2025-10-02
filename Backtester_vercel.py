@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 # ==========================================================
-# Backtester_vercel.py v1.5.3
-# Hybrid Backtester: Optimized for Vercel deployment
+# Backtester_vercel.py v1.6.0 (All-In-One Stable Release)
 # ==========================================================
 
-import os, io, re, json, warnings, argparse, glob, sys
+import os, io, re, json, argparse, glob, sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, time
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -26,7 +25,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.5.3"
+    version: str = "1.6.0"
     algo_params: dict = None
     def __post_init__(self):
         if self.algo_params is None:
@@ -72,7 +71,6 @@ def _exit_reason(text: str) -> str:
     if any(w in s for w in ["TARGET","TGT","TP","PROFIT"]): return "Target"
     if any(w in s for w in ["STOP","LOSS LIMIT"]): return "Stop"
     if any(w in s for w in ["TIME","TIMED"]): return "Time"
-    if any(w in s for w in ["MANUAL","MKT CLOSE","DISCRETIONARY"]): return "Other"
     return "Close"
 
 def normalize_symbol(sym: str) -> str:
@@ -82,7 +80,7 @@ def normalize_symbol(sym: str) -> str:
     return f"/{s.upper()}"
 
 # =========================
-# Load TOS Report
+# Load Strategy Report
 # =========================
 def load_tos_strategy_report(file_path: str, cfg: BacktestConfig) -> pd.DataFrame:
     with open(file_path, "r", errors="replace") as f:
@@ -128,11 +126,12 @@ def build_trades(df: pd.DataFrame, commission_rt: float):
     i=0
     while i < len(df)-1:
         entry, exit_ = df.iloc[i], df.iloc[i+1]
-        side_entry=str(entry["Side"]).upper() if "Side" in entry else ""
-        side_exit=str(exit_["Side"]).upper() if "Side" in exit_ else ""
+        if "Side" not in entry or "Side" not in exit_:
+            i+=1; continue
+        side_entry=str(entry["Side"]).upper()
+        side_exit=str(exit_["Side"]).upper()
         if any(x in side_entry for x in ["BTO","STO"]) and any(x in side_exit for x in ["STC","BTC"]):
-            entry_qty = pd.to_numeric(entry.get("Qty"), errors="coerce")
-            qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty!=0 else 1.0
+            qty_abs = 1.0
             direction = "Long" if "BTO" in side_entry else "Short"
             trade_pl = pd.to_numeric(exit_.get("TradePL"), errors="coerce")
             commission = commission_rt * qty_abs
@@ -140,14 +139,12 @@ def build_trades(df: pd.DataFrame, commission_rt: float):
             trades.append({
                 "EntryTime": entry["Date"],
                 "ExitTime": exit_["Date"],
-                "EntryPrice": entry.get("Price"),
-                "ExitPrice": exit_.get("Price"),
-                "QtyAbs": qty_abs,
                 "TradePL": trade_pl,
                 "Commission": commission,
                 "NetPL": net_pl,
                 "ExitReason": _exit_reason(exit_.get("Side")),
-                "Direction": direction
+                "Direction": direction,
+                "QtyAbs": qty_abs
             })
             i+=2
         else:
@@ -168,7 +165,7 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float):
     return df
 
 # =========================
-# Metrics
+# Compute Metrics (Full Detailed)
 # =========================
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str, non_rth_trades=0):
     if trades_df.empty:
@@ -176,19 +173,24 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     df=trades_df.copy()
     pl=df["AdjustedNetPL"]
     equity=cfg.initial_capital+pl.cumsum()
-    max_dd_pct=abs(_max_drawdown(equity))*100.0
-    return {
+    wins, losses = pl[pl>0], pl[pl<0]
+
+    metrics = {
         "scope":scope_label,
         "strategy_name":cfg.strategy_name,
         "num_trades":len(df),
         "net_profit":float(pl.sum()),
         "profit_factor":_profit_factor(pl),
         "win_rate_pct":float((pl>0).mean()*100.0),
-        "avg_win":float(pl[pl>0].mean()) if (pl>0).any() else 0.0,
-        "avg_loss":float(pl[pl<0].mean()) if (pl<0).any() else 0.0,
-        "expectancy":float(pl.mean()) if len(pl)>0 else 0.0,
-        "max_drawdown_pct":max_dd_pct
+        "avg_win":float(wins.mean()) if not wins.empty else 0.0,
+        "avg_loss":float(losses.mean()) if not losses.empty else 0.0,
+        "expectancy":float(pl.mean()),
+        "max_drawdown_pct":abs(_max_drawdown(equity))*100.0,
+        "sharpe_ratio":float(pl.mean()/pl.std()) if pl.std()!=0 else 0.0,
+        "stoploss_hits":int((df["RawLossExceeds100"]).sum()),
+        "avg_hold_mins":float(df["HoldMins"].mean()) if "HoldMins" in df else 0.0
     }
+    return metrics
 
 # =========================
 # Save Visuals
@@ -197,14 +199,27 @@ def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir
     os.makedirs(outdir, exist_ok=True)
     pl=trades_df["AdjustedNetPL"].fillna(0.0)
     equity=cfg.initial_capital+pl.cumsum()
-    plt.figure(figsize=(9,4)); plt.plot(equity.index,equity.values); plt.title("Equity Curve"); plt.savefig(os.path.join(outdir,f"equity_curve_{title_suffix}.png")); plt.close()
+    plt.figure(figsize=(9,4)); plt.plot(equity.index,equity.values)
+    plt.title("Equity Curve"); plt.grid(True)
+    plt.savefig(os.path.join(outdir,f"equity_curve_{title_suffix}.png")); plt.close()
 
 # =========================
 # Markdown Report
 # =========================
 def generate_analytics_md(trades_all, trades_rth, metrics, cfg, non_rth_trades, outdir):
-    md=f"# Strategy Report\n**Trades:** {metrics['num_trades']}\n**Net Profit:** {metrics['net_profit']}\n**Win Rate:** {metrics['win_rate_pct']}%\n**Profit Factor:** {metrics['profit_factor']:.2f}\n"
-    with open(os.path.join(outdir,"analytics.md"),"w") as f:f.write(md)
+    md = [
+        f"# Strategy Report ({cfg.version})",
+        f"**Trades:** {metrics['num_trades']}",
+        f"**Net Profit:** ${metrics['net_profit']:.2f}",
+        f"**Win Rate:** {metrics['win_rate_pct']:.2f}%",
+        f"**Profit Factor:** {metrics['profit_factor']:.2f}",
+        f"**Expectancy:** {metrics['expectancy']:.2f}",
+        f"**Max Drawdown:** {metrics['max_drawdown_pct']:.2f}%",
+        f"**Sharpe Ratio:** {metrics['sharpe_ratio']:.2f}",
+        f"**Stop-Loss Hits:** {metrics['stoploss_hits']}",
+        f"**Avg Hold (mins):** {metrics['avg_hold_mins']:.1f}",
+    ]
+    with open(os.path.join(outdir,"analytics.md"),"w") as f: f.write("\n".join(md))
 
 # =========================
 # Run Backtest
@@ -215,16 +230,18 @@ def run_backtest_for_instrument(df_raw,instrument,cfg,csv_stem):
     pv=5.0 if instr.upper()=="/MES" else 2.0
     cfg.point_value=pv
     outdir=cfg.outdir(csv_stem,instr,cfg.strategy_name)
+
     trades_all,_=build_trades(df_raw,cfg.commission_per_round_trip)
     trades_all=apply_stoploss_corrections(trades_all,cfg.point_value)
-    metrics=compute_metrics(trades_all,cfg,"ALL")
+    metrics_all=compute_metrics(trades_all,cfg,"ALL")
+
     os.makedirs(outdir,exist_ok=True)
     trades_all.to_csv(os.path.join(outdir,"trades_enriched.csv"),index=False)
-    with open(os.path.join(outdir,"metrics.json"),"w") as f:json.dump(metrics,f,indent=2)
+    with open(os.path.join(outdir,"metrics.json"),"w") as f: json.dump(metrics_all,f,indent=2)
     save_visuals_and_tables(trades_all,cfg,outdir)
-    generate_analytics_md(trades_all,trades_all,metrics,cfg,0,outdir)
-    with open(os.path.join(outdir,"config.json"),"w") as f:json.dump(asdict(cfg),f,indent=2)
-    return trades_all,trades_all,metrics,outdir
+    generate_analytics_md(trades_all,trades_all,metrics_all,cfg,0,outdir)
+    with open(os.path.join(outdir,"config.json"),"w") as f: json.dump(asdict(cfg),f,indent=2)
+    return trades_all,trades_all,metrics_all,outdir
 
 def run_backtest(tos_csv_path,cfg):
     csv_stem=Path(tos_csv_path).stem.replace(" ","_")
@@ -268,10 +285,10 @@ if __name__=="__main__":
             all_metrics.append(m)
 
     consolidated=Path("/tmp")/f"metrics_consolidated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(consolidated,"w") as f:json.dump(all_metrics,f,indent=2)
+    with open(consolidated,"w") as f: json.dump(all_metrics,f,indent=2)
     print(f"[DONE] {len(csv_paths)} CSV(s). Consolidated metrics at {consolidated}")
     sys.exit(0)
 
 # =========================
-# End of Backtester_vercel.py v1.5.3
+# End of Backtester_vercel.py v1.6.0
 # =========================
