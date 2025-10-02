@@ -1,4 +1,3 @@
-```python
 # -*- coding: utf-8 -*-
 # Hybrid Backtester: Optimized for Vercel deployment
 # Combines comprehensive metrics, visuals, and robustness with serverless efficiency
