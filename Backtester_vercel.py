@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 # Backtester_vercel.py
-# Backtester with analytics, simplified for Vercel
+# Hybrid Backtester v1.4.2 (Vercel-friendly, no timeframe arg)
 
-import os, io, re, json, glob
-from dataclasses import dataclass
-from datetime import datetime
+import os, io, re, json, glob, sys
+from dataclasses import dataclass, asdict
+from datetime import datetime, time
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Optional
 
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg')  # serverless backend
 import matplotlib.pyplot as plt
 
 # =========================
@@ -26,10 +26,10 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.3.4"
+    version: str = "1.4.2"
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
-        temp_dir = Path("/tmp")
+        temp_dir = Path('/tmp')
         day = datetime.now().strftime("%Y-%m-%d")
         timestamp = datetime.now().strftime("%H%M%S_%f")[:-3]
         safe_strategy = (strategy_label or "Unknown").replace(" ", "_")
@@ -44,12 +44,12 @@ def _to_float(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.replace(r"[\$,]", "", regex=True)
     s = s.str.replace(r"\(([^()]*)\)", r"-\1", regex=True)
     s = s.replace("", np.nan)
-    return pd.to_numeric(s, errors="coerce")
+    return pd.to_numeric(s, errors='coerce')
 
 def _parse_datetime(series: pd.Series) -> pd.Series:
-    parsed = pd.to_datetime(series, format="%m/%d/%y %I:%M %p", errors="coerce")
+    parsed = pd.to_datetime(series, format="%m/%d/%y %I:%M %p", errors='coerce')
     if parsed.isna().all():
-        parsed = pd.to_datetime(series, errors="coerce")
+        parsed = pd.to_datetime(series, errors='coerce')
     return parsed
 
 def _max_drawdown(equity_curve: pd.Series) -> float:
@@ -96,7 +96,7 @@ def normalize_symbol(sym: str) -> str:
 # =========================
 
 def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
-    with open(file_path, "r", errors="replace") as f:
+    with open(file_path, 'r', errors='replace') as f:
         lines = f.readlines()
     start_idx = None
     for i, line in enumerate(lines):
@@ -104,27 +104,28 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
             start_idx = i
             break
     if start_idx is None:
-        raise ValueError("No table header found.")
-    df = pd.read_csv(io.StringIO("".join(lines[start_idx:])), sep=";")
+        raise ValueError("No trade table header found in file.")
+    table_str = "".join(lines[start_idx:])
+    df = pd.read_csv(io.StringIO(table_str), sep=';')
 
-    if "Date/Time" in df.columns:
-        df["Date"] = _parse_datetime(df["Date/Time"])
-    elif "Date" in df.columns and "Time" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"].astype(str) + " " + df["Time"].astype(str), errors="coerce")
-    elif "Date" in df.columns:
-        df["Date"] = _parse_datetime(df["Date"])
+    if 'Date/Time' in df.columns:
+        df['Date'] = _parse_datetime(df['Date/Time'])
+    elif 'Date' in df.columns and 'Time' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Time'].astype(str), errors='coerce')
+    elif 'Date' in df.columns:
+        df['Date'] = _parse_datetime(df['Date'])
     else:
         raise ValueError("No Date column found.")
 
-    df["TradePL"] = _to_float(df.get("Trade P/L", pd.Series([]))).fillna(0.0)
-    df["CumPL"] = _to_float(df["P/L"]) if "P/L" in df.columns else np.nan
-    df["BaseStrategy"] = df["Strategy"].astype(str).str.split("(").str[0].str.strip() if "Strategy" in df.columns else "Unknown"
-    side_col = next((c for c in ["Side","Action","Order","Type"] if c in df.columns), None)
-    df["Side"] = df[side_col].astype(str) if side_col else ""
-    if "Price" not in df.columns: df["Price"] = np.nan
-    df["Qty"] = pd.to_numeric(df.get("Quantity", df.get("Qty", np.nan)), errors="coerce")
-    df["Symbol"] = df.get("Symbol", df.get("Instrument", df["Strategy"])).astype(str).map(normalize_symbol)
-    return df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+    df['TradePL'] = _to_float(df.get('Trade P/L', pd.Series([]))).fillna(0.0)
+    df['CumPL'] = _to_float(df['P/L']) if 'P/L' in df.columns else np.nan
+    df['BaseStrategy'] = df['Strategy'].astype(str).str.split('(').str[0].str.strip() if 'Strategy' in df.columns else "Unknown"
+    side_col = next((c for c in ['Side','Action','Order','Type'] if c in df.columns), None)
+    df['Side'] = df[side_col].astype(str) if side_col else ""
+    if 'Price' not in df.columns: df['Price'] = np.nan
+    df['Qty'] = pd.to_numeric(df.get('Quantity', df.get('Qty', np.nan)), errors='coerce')
+    df['Symbol'] = df.get('Symbol', df.get('Instrument', df['Strategy'])).astype(str).map(normalize_symbol)
+    return df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
 
 # =========================
 # Build Trades
