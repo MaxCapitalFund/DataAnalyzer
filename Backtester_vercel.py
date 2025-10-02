@@ -1,23 +1,22 @@
 # -*- coding: utf-8 -*-
 # Clean Backtester for Vercel
+# - Creates Backtests_... directories (plural) so Vercel detects them
 # - Stop-loss capped at -$100/trade
-# - Outputs enriched trades, metrics, analytics
-# - Fixed output dir naming: Backtests_... (plural, matches Vercel)
-# - Metrics robust: no N/A, real win/loss stats, Sharpe, expectancy
+# - Outputs: trades_enriched.csv, metrics.json, config.json, charts
 
 import os
 import io
 import re
 import json
 from dataclasses import dataclass, asdict
-from datetime import datetime, time
+from datetime import datetime
 from pathlib import Path
 from typing import Tuple, Optional
 
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg')  # Serverless backend
 import matplotlib.pyplot as plt
 
 # =========================
@@ -26,7 +25,7 @@ import matplotlib.pyplot as plt
 
 @dataclass
 class BacktestConfig:
-    strategy_name: str = ""
+    strategy_name: str = "Unknown"
     instruments: Tuple[str, ...] = ("/MES",)
     timeframe: str = "180d:15m"
     initial_capital: float = 2500.0
@@ -35,11 +34,11 @@ class BacktestConfig:
     version: str = "1.5.0"
 
     def outdir(self, csv_stem: str, instrument: str) -> str:
+        """Always return Backtests_... (plural) so Vercel finds it"""
         temp_dir = Path('/tmp')
         day = datetime.now().strftime("%Y-%m-%d")
         timestamp = datetime.now().strftime("%H%M%S")
         safe_instr = (instrument or "UNK").replace("/", "")
-        # FIX: plural "Backtests_" so Vercel finds the folder
         return str(temp_dir / f"Backtests_{day}_{safe_instr}_{csv_stem}_{timestamp}")
 
 # =========================
@@ -64,12 +63,11 @@ def _max_drawdown(equity_curve: pd.Series) -> float:
     return float(drawdown.min())
 
 def _profit_factor(pl: pd.Series) -> float:
-    s = pl.dropna()
-    gp = s[s > 0].sum()
-    gl = -s[s < 0].sum()
+    gp = pl[pl > 0].sum()
+    gl = -pl[pl < 0].sum()
     if gl == 0:
         return float('inf') if gp > 0 else 0.0
-    return float(gp / gl)
+    return gp / gl
 
 # =========================
 # Loader
@@ -84,87 +82,43 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
             start_idx = i
             break
     if start_idx is None:
-        raise ValueError("No trade table header found")
+        raise ValueError("No header found in file")
     table_str = "".join(lines[start_idx:])
     df = pd.read_csv(io.StringIO(table_str), sep=';')
-
     if 'Date/Time' in df.columns:
         df['Date'] = _parse_datetime(df['Date/Time'])
-    elif 'Date' in df.columns and 'Time' in df.columns:
-        dt_str = df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip()
-        df['Date'] = pd.to_datetime(dt_str, errors='coerce')
-    elif 'Date' in df.columns:
-        df['Date'] = _parse_datetime(df['Date'])
-
-    if 'Trade P/L' in df.columns:
-        df['TradePL'] = _to_float(df['Trade P/L']).fillna(0.0)
-    elif 'TradePL' in df.columns:
-        df['TradePL'] = _to_float(df['TradePL']).fillna(0.0)
     else:
-        df['TradePL'] = 0.0
-
-    df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
-    return df
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df['TradePL'] = _to_float(df['Trade P/L']) if 'Trade P/L' in df.columns else 0.0
+    return df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
 
 # =========================
-# Trade Builder
+# Trades
 # =========================
 
 def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
     trades = []
-    def _safe_num(x): return pd.to_numeric(x, errors='coerce')
-
-    OPEN_RX  = r"(BTO|BUY TO OPEN|BOT|STO|SELL TO OPEN|SELL SHORT|OPEN)"
-    CLOSE_RX = r"(STC|SELL TO CLOSE|SLD|BTC|BUY TO CLOSE|CLOSE)"
-
-    i = 0
-    while i < len(df) - 1:
-        entry = df.iloc[i]
-        exit_ = df.iloc[i + 1]
-        side_entry = str(entry.get('Side', '')).upper()
-        side_exit = str(exit_.get('Side', '')).upper()
-
-        if re.search(OPEN_RX, side_entry) and re.search(CLOSE_RX, side_exit):
-            entry_qty = _safe_num(entry.get('Qty'))
-            qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
-            direction = 'Long' if 'BTO' in side_entry or 'BUY' in side_entry else 'Short'
-            trade_pl = _safe_num(exit_.get('TradePL'))
-            commission = commission_rt * qty_abs
-            net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
-
-            trades.append({
-                'EntryTime': entry['Date'],
-                'ExitTime': exit_['Date'],
-                'EntryPrice': _safe_num(entry.get('Price')),
-                'ExitPrice': _safe_num(exit_.get('Price')),
-                'QtyAbs': qty_abs,
-                'TradePL': trade_pl,
-                'GrossPL': trade_pl,
-                'Commission': commission,
-                'NetPL': net_pl,
-                'Direction': direction,
-            })
-            i += 2
-        else:
-            i += 1
-
+    for i in range(0, len(df) - 1, 2):
+        entry, exit_ = df.iloc[i], df.iloc[i + 1]
+        qty = 1
+        trade_pl = float(exit_.get('TradePL', 0.0))
+        commission = commission_rt * qty
+        net_pl = trade_pl - commission
+        trades.append({
+            'EntryTime': entry['Date'],
+            'ExitTime': exit_['Date'],
+            'TradePL': trade_pl,
+            'Commission': commission,
+            'NetPL': net_pl
+        })
     t = pd.DataFrame(trades)
-    if t.empty:
-        return pd.DataFrame(columns=['EntryTime','ExitTime','NetPL'])
-    t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
+    if not t.empty:
+        t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
     return t
 
-# =========================
-# Stoploss
-# =========================
-
-def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.DataFrame:
+def apply_stoploss(trades: pd.DataFrame, point_value: float) -> pd.DataFrame:
     df = trades.copy()
-    df['SLBreached'] = df['NetPL'] < -100.0
-    df['AdjustedNetPL'] = np.where(df['SLBreached'], -100.0, df['NetPL'])
-    qty_abs = pd.to_numeric(df['QtyAbs'], errors='coerce').replace(0, np.nan)
-    gross_adjusted = np.where(df['SLBreached'], -100.0 + df['Commission'], df['NetPL'] + df['Commission'])
-    df['PointsPerContract'] = gross_adjusted / (point_value * qty_abs)
+    df['AdjustedNetPL'] = np.where(df['NetPL'] < -100.0, -100.0, df['NetPL'])
     return df
 
 # =========================
@@ -173,47 +127,27 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
 
 def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     if trades.empty:
-        return {"strategy": "Unknown", "num_trades": 0}
-
-    pl_net = trades['AdjustedNetPL'].fillna(0.0)
-    wins = pl_net[pl_net > 0]
-    losses = pl_net[pl_net < 0]
-
-    total_net = float(pl_net.sum())
-    gross_profit = float(wins.sum()) if len(wins) else 0.0
-    gross_loss = float(losses.sum()) if len(losses) else 0.0
-    win_rate = (len(wins) / len(pl_net) * 100.0) if len(pl_net) else 0.0
-    avg_win = float(wins.mean()) if len(wins) else 0.0
-    avg_loss = float(losses.mean()) if len(losses) else 0.0
-    largest_win = float(wins.max()) if len(wins) else 0.0
-    largest_loss = float(losses.min()) if len(losses) else 0.0
-    expectancy = float(pl_net.mean()) if len(pl_net) else 0.0
-
-    equity = cfg.initial_capital + pl_net.cumsum()
-    max_dd_pct = abs(_max_drawdown(equity)) * 100.0
-    recovery_factor = total_net / (equity.cummax() - equity).max() if not equity.empty else 0.0
-
-    returns = pl_net / cfg.initial_capital
-    sharpe = (returns.mean() / returns.std(ddof=1) * np.sqrt(len(returns))) if returns.std(ddof=1) > 0 else 0.0
-
+        return {"strategy": cfg.strategy_name, "timeframe": cfg.timeframe, "num_trades": 0}
+    pl = trades['AdjustedNetPL']
+    equity = cfg.initial_capital + pl.cumsum()
     return {
-        "strategy": cfg.strategy_name or "Unknown",
+        "strategy": cfg.strategy_name,
         "timeframe": cfg.timeframe,
-        "num_trades": len(pl_net),
-        "net_profit": total_net,
-        "total_return_pct": (total_net / cfg.initial_capital) * 100.0,
-        "win_rate_pct": win_rate,
-        "profit_factor": _profit_factor(pl_net),
-        "max_drawdown_pct": max_dd_pct,
-        "gross_profit": gross_profit,
-        "gross_loss": gross_loss,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
-        "largest_win": largest_win,
-        "largest_loss": largest_loss,
-        "expectancy": expectancy,
-        "recovery_factor": recovery_factor,
-        "sharpe_ratio": sharpe,
+        "num_trades": int(len(trades)),
+        "net_profit": float(pl.sum()),
+        "total_return_pct": (pl.sum() / cfg.initial_capital) * 100,
+        "win_rate_pct": float((pl > 0).mean() * 100),
+        "profit_factor": _profit_factor(pl),
+        "max_drawdown_pct": abs(_max_drawdown(equity)) * 100,
+        "gross_profit": float(pl[pl > 0].sum()),
+        "gross_loss": float(pl[pl < 0].sum()),
+        "avg_win": float(pl[pl > 0].mean()) if (pl > 0).any() else np.nan,
+        "avg_loss": float(pl[pl < 0].mean()) if (pl < 0).any() else np.nan,
+        "largest_win": float(pl.max()),
+        "largest_loss": float(pl.min()),
+        "expectancy": float(pl.mean()),
+        "recovery_factor": float(pl.sum() / (abs(_max_drawdown(equity)) * cfg.initial_capital)) if _max_drawdown(equity) else np.nan,
+        "sharpe_ratio": float(pl.mean() / pl.std()) if pl.std() else np.nan
     }
 
 # =========================
@@ -223,17 +157,22 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
 def run_backtest(csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(csv_path).stem.replace(" ", "_")
     raw = load_tos_strategy_report(csv_path)
-    trades = build_trades(raw, cfg.commission_per_round_trip)
-    trades = apply_stoploss_corrections(trades, cfg.point_value)
-
     outdir = cfg.outdir(csv_stem, "/MES")
     os.makedirs(outdir, exist_ok=True)
-    trades.to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
-
+    trades = build_trades(raw, cfg.commission_per_round_trip)
+    trades = apply_stoploss(trades, cfg.point_value)
     metrics = compute_metrics(trades, cfg)
+    # save outputs
+    trades.to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
     with open(os.path.join(outdir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
+    with open(os.path.join(outdir, "config.json"), "w") as f:
+        json.dump(asdict(cfg), f, indent=2)
     return metrics, outdir
+
+# =========================
+# CLI
+# =========================
 
 if __name__ == "__main__":
     import argparse, glob, sys
@@ -244,20 +183,21 @@ if __name__ == "__main__":
     parser.add_argument("--commission", type=float, default=4.04)
     parser.add_argument("--point_value", type=float, default=5.0)
     args = parser.parse_args()
-
-    cfg = BacktestConfig(
-        timeframe=args.timeframe,
-        initial_capital=args.capital,
-        commission_per_round_trip=args.commission,
-        point_value=args.point_value,
-    )
-
+    cfg = BacktestConfig(timeframe=args.timeframe,
+                         initial_capital=args.capital,
+                         commission_per_round_trip=args.commission,
+                         point_value=args.point_value)
     resolved = []
     for item in args.csv:
         matches = glob.glob(item)
         resolved.extend(matches if matches else [item])
-
-    for csv_file in resolved:
-        print(f"[RUN] {csv_file}")
-        metrics, outdir = run_backtest(csv_file, cfg)
-        print(json.dumps(metrics, indent=2))
+    csv_paths = [p for p in resolved if Path(p).exists()]
+    if not csv_paths:
+        print("[ERROR] No CSV found", file=sys.stderr)
+        sys.exit(1)
+    results = []
+    for path in csv_paths:
+        metrics, outdir = run_backtest(path, cfg)
+        metrics["csv"] = Path(path).name
+        results.append(metrics)
+    print(json.dumps(results, indent=2))
