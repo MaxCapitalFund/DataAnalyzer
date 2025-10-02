@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 # ==========================================================
-# Backtester_vercel.py v1.6.0 (All-In-One Stable Release)
+# Backtester_vercel.py v1.6.1 (Stable, Full Inline Functions)
 # ==========================================================
 
 import os, io, re, json, argparse, glob, sys
 from dataclasses import dataclass, asdict
-from datetime import datetime, time
+from datetime import datetime
 from pathlib import Path
 from typing import Tuple
 import numpy as np
@@ -25,7 +25,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.6.0"
+    version: str = "1.6.1"
     algo_params: dict = None
     def __post_init__(self):
         if self.algo_params is None:
@@ -119,17 +119,15 @@ def load_tos_strategy_report(file_path: str, cfg: BacktestConfig) -> pd.DataFram
     return df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
 # =========================
-# Build Trades
+# Build Trades (patched to always include NetPL)
 # =========================
 def build_trades(df: pd.DataFrame, commission_rt: float):
     trades=[]
     i=0
     while i < len(df)-1:
         entry, exit_ = df.iloc[i], df.iloc[i+1]
-        if "Side" not in entry or "Side" not in exit_:
-            i+=1; continue
-        side_entry=str(entry["Side"]).upper()
-        side_exit=str(exit_["Side"]).upper()
+        side_entry=str(entry.get("Side","")).upper()
+        side_exit=str(exit_.get("Side","")).upper()
         if any(x in side_entry for x in ["BTO","STO"]) and any(x in side_exit for x in ["STC","BTC"]):
             qty_abs = 1.0
             direction = "Long" if "BTO" in side_entry else "Short"
@@ -149,9 +147,14 @@ def build_trades(df: pd.DataFrame, commission_rt: float):
             i+=2
         else:
             i+=1
-    t=pd.DataFrame(trades)
-    if not t.empty:
+
+    # ✅ Ensure consistent schema (always has NetPL column)
+    if trades:
+        t=pd.DataFrame(trades)
         t["HoldMins"]=(t["ExitTime"]-t["EntryTime"]).dt.total_seconds()/60.0
+    else:
+        t=pd.DataFrame(columns=["EntryTime","ExitTime","TradePL","Commission","NetPL",
+                                "ExitReason","Direction","QtyAbs","HoldMins"])
     return t,0
 
 # =========================
@@ -161,11 +164,11 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float):
     df=trades.copy()
     df["RawLossExceeds100"]=df["NetPL"]<-100.0
     df["AdjustedNetPL"]=np.where(df["NetPL"]<-100.0,-100.0,df["NetPL"])
-    df["PointsPerContract"]=df["AdjustedNetPL"]/(point_value*df["QtyAbs"])
+    df["PointsPerContract"]=np.where(df["QtyAbs"]>0, df["AdjustedNetPL"]/(point_value*df["QtyAbs"]), 0.0)
     return df
 
 # =========================
-# Compute Metrics (Full Detailed)
+# Compute Metrics (Detailed)
 # =========================
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str, non_rth_trades=0):
     if trades_df.empty:
@@ -174,8 +177,7 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
     pl=df["AdjustedNetPL"]
     equity=cfg.initial_capital+pl.cumsum()
     wins, losses = pl[pl>0], pl[pl<0]
-
-    metrics = {
+    return {
         "scope":scope_label,
         "strategy_name":cfg.strategy_name,
         "num_trades":len(df),
@@ -190,7 +192,6 @@ def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: s
         "stoploss_hits":int((df["RawLossExceeds100"]).sum()),
         "avg_hold_mins":float(df["HoldMins"].mean()) if "HoldMins" in df else 0.0
     }
-    return metrics
 
 # =========================
 # Save Visuals
@@ -290,5 +291,5 @@ if __name__=="__main__":
     sys.exit(0)
 
 # =========================
-# End of Backtester_vercel.py v1.6.0
+# End of Backtester_vercel.py v1.6.1
 # =========================
