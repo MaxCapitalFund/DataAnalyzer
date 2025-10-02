@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Backtester_vercel.py
-# Backtester with analytics, Vercel-friendly
+# Backtester with analytics, simplified for Vercel
 
 import os, io, re, json, glob
 from dataclasses import dataclass
@@ -22,11 +22,11 @@ import matplotlib.pyplot as plt
 class BacktestConfig:
     strategy_name: str = ""
     instruments: Tuple[str, ...] = ("/MES",)
-    timeframe: str = "180d:15m"
+    timeframe: str = "180d:15m"   # fixed default
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.3.3"
+    version: str = "1.3.4"
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path("/tmp")
@@ -275,14 +275,12 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Backtester with analytics (Vercel-friendly)")
     parser.add_argument("--csv", nargs="+", required=True, help="Path(s) to TOS CSV(s)")
-    parser.add_argument("--timeframe", type=str, default="180d:15m", help="Timeframe label for outputs")
     parser.add_argument("--capital", type=float, default=2500.0, help="Initial capital")
     parser.add_argument("--commission", type=float, default=4.04, help="Commission per round trip")
     parser.add_argument("--point_value", type=float, default=5.0, help="Point value ($ per point per contract)")
     args = parser.parse_args()
 
     cfg = BacktestConfig(
-        timeframe=args.timeframe,
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
