@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Tuple, Optional
 
 import numpy as np
-import pandas as pd
+import pandas as pd   # <-- FIXED: ensure pandas is imported before usage
+
 
 # =========================
 # Config
@@ -27,7 +28,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.5.0"
+    version: str = "1.5.1"
 
     def outdir(self, csv_stem: str, instrument: str) -> str:
         temp_dir = Path('/tmp')
