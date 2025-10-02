@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # ==========================================================
-# Backtester_vercel.py v1.6.1 (Stable, Full Inline Functions)
+# Backtester_vercel.py v1.6.2 (Hardened)
+# - Guarantees NetPL exists in all DataFrames
+# - Fixes KeyError: 'NetPL'
 # ==========================================================
 
 import os, io, re, json, argparse, glob, sys
@@ -25,7 +27,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.6.1"
+    version: str = "1.6.2"
     algo_params: dict = None
     def __post_init__(self):
         if self.algo_params is None:
@@ -119,7 +121,7 @@ def load_tos_strategy_report(file_path: str, cfg: BacktestConfig) -> pd.DataFram
     return df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
 # =========================
-# Build Trades (patched to always include NetPL)
+# Build Trades
 # =========================
 def build_trades(df: pd.DataFrame, commission_rt: float):
     trades=[]
@@ -140,6 +142,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float):
                 "TradePL": trade_pl,
                 "Commission": commission,
                 "NetPL": net_pl,
+                "AdjustedNetPL": net_pl,  # ✅ ensure exists
                 "ExitReason": _exit_reason(exit_.get("Side")),
                 "Direction": direction,
                 "QtyAbs": qty_abs
@@ -148,13 +151,14 @@ def build_trades(df: pd.DataFrame, commission_rt: float):
         else:
             i+=1
 
-    # ✅ Ensure consistent schema (always has NetPL column)
     if trades:
         t=pd.DataFrame(trades)
         t["HoldMins"]=(t["ExitTime"]-t["EntryTime"]).dt.total_seconds()/60.0
     else:
-        t=pd.DataFrame(columns=["EntryTime","ExitTime","TradePL","Commission","NetPL",
-                                "ExitReason","Direction","QtyAbs","HoldMins"])
+        # ✅ guarantee schema even if empty
+        t=pd.DataFrame(columns=["EntryTime","ExitTime","TradePL","Commission",
+                                "NetPL","AdjustedNetPL","ExitReason","Direction",
+                                "QtyAbs","HoldMins"])
     return t,0
 
 # =========================
@@ -162,13 +166,18 @@ def build_trades(df: pd.DataFrame, commission_rt: float):
 # =========================
 def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float):
     df=trades.copy()
+    # ✅ safety guard: if NetPL missing, create it
+    if "NetPL" not in df.columns:
+        df["NetPL"]=0.0
     df["RawLossExceeds100"]=df["NetPL"]<-100.0
     df["AdjustedNetPL"]=np.where(df["NetPL"]<-100.0,-100.0,df["NetPL"])
-    df["PointsPerContract"]=np.where(df["QtyAbs"]>0, df["AdjustedNetPL"]/(point_value*df["QtyAbs"]), 0.0)
+    df["PointsPerContract"]=np.where(df.get("QtyAbs",1)>0,
+                                     df["AdjustedNetPL"]/(point_value*df.get("QtyAbs",1)),
+                                     0.0)
     return df
 
 # =========================
-# Compute Metrics (Detailed)
+# Compute Metrics
 # =========================
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str, non_rth_trades=0):
     if trades_df.empty:
@@ -291,5 +300,5 @@ if __name__=="__main__":
     sys.exit(0)
 
 # =========================
-# End of Backtester_vercel.py v1.6.1
+# End of Backtester_vercel.py v1.6.2
 # =========================
