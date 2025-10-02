@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 # Backtester_vercel.py
 # Clean, robust version — Vercel-ready
-# Fixes trade pairing logic + metrics (no more N/A values)
-
+# Outputs: trades_enriched.csv, metrics.json, analytics.md
 import os
 import io
 import re
@@ -13,9 +12,6 @@ from pathlib import Path
 from typing import Tuple
 import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')  # serverless safe
-import matplotlib.pyplot as plt  # visuals
 
 # =========================
 # Config
@@ -28,13 +24,12 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.6-final"
-
+    version: str = "1.7"
     def outdir(self, csv_stem: str, instrument: str) -> str:
         temp_dir = Path('/tmp')
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_instr = instrument.replace("/", "")
-        # ✅ Changed from Backtest_ → Backtests_
+        print(f"[DEBUG] Outdir = Backtests_{ts}_{safe_instr}_{csv_stem}")
         return str(temp_dir / f"Backtests_{ts}_{safe_instr}_{csv_stem}")
 
 # =========================
@@ -75,7 +70,6 @@ def _exit_reason(text: str) -> str:
     return "Close"
 
 def normalize_symbol(sym: str) -> str:
-    """Normalize contract codes like /MESU25 → /MES."""
     s = str(sym).strip()
     if not s:
         return "/UNK"
@@ -136,7 +130,7 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     return df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
 
 # =========================
-# Build Trades (robust)
+# Build Trades
 # =========================
 def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
     trades = []
@@ -158,14 +152,6 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                 exit_ = after_entry_close.iloc[0] if len(after_entry_close) else close_rows.iloc[-1]
                 entry_qty = _safe_num(entry.get('Qty'))
                 qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
-                direction = 'Unknown'
-                es = str(entry.get('Side', '')).upper()
-                if re.search(r"\b(BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN)\b", es):
-                    direction = 'Long'
-                elif re.search(r"\b(STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT)\b", es):
-                    direction = 'Short'
-                elif pd.notna(entry_qty):
-                    direction = 'Long' if entry_qty > 0 else 'Short'
                 trade_pl = _safe_num(exit_.get('TradePL'))
                 commission = commission_rt * qty_abs
                 net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
@@ -173,52 +159,10 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                     'Id': tid,
                     'EntryTime': entry['Date'],
                     'ExitTime': exit_['Date'],
-                    'EntryPrice': _safe_num(entry.get('Price')),
-                    'ExitPrice': _safe_num(exit_.get('Price')),
-                    'EntryQty': entry_qty,
-                    'ExitQty': _safe_num(exit_.get('Qty')),
-                    'QtyAbs': qty_abs,
                     'TradePL': trade_pl,
-                    'GrossPL': trade_pl,
                     'Commission': commission,
                     'NetPL': net_pl,
-                    'BaseStrategy': entry.get('BaseStrategy', 'Unknown'),
-                    'StrategyRaw': entry.get('Strategy', ''),
-                    'Symbol': entry.get('Symbol', '/UNK'),
-                    'EntrySide': str(entry.get('Side', '')),
-                    'ExitSide': str(exit_.get('Side', '')),
-                    'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order')),
-                    'Direction': direction
                 })
-    if not trades:
-        side_up = df['Side'].astype(str).str.upper()
-        close_rows = df[side_up.str.contains(CLOSE_RX, regex=True, na=False)]
-        for _, row in close_rows.iterrows():
-            qty_abs = 1.0
-            trade_pl = _safe_num(row.get('TradePL'))
-            commission = commission_rt * qty_abs
-            net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
-            trades.append({
-                'Id': row.get('Id', np.nan),
-                'EntryTime': pd.NaT,
-                'ExitTime': row['Date'],
-                'EntryPrice': np.nan,
-                'ExitPrice': _safe_num(row.get('Price')),
-                'EntryQty': np.nan,
-                'ExitQty': _safe_num(row.get('Qty')),
-                'QtyAbs': qty_abs,
-                'TradePL': trade_pl,
-                'GrossPL': trade_pl,
-                'Commission': commission,
-                'NetPL': net_pl,
-                'BaseStrategy': row.get('BaseStrategy', 'Unknown'),
-                'StrategyRaw': row.get('Strategy', ''),
-                'Symbol': row.get('Symbol', '/UNK'),
-                'EntrySide': str(row.get('Side', '')),
-                'ExitSide': str(row.get('Side', '')),
-                'ExitReason': _exit_reason(row.get('Side') or row.get('Type') or row.get('Order')),
-                'Direction': 'Unknown'
-            })
     t = pd.DataFrame(trades)
     if t.empty:
         return t.assign(HoldMins=np.nan)
@@ -265,43 +209,8 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     }
 
 # =========================
-# Visuals and Markdown
+# Analytics Markdown
 # =========================
-def save_visuals_and_tables(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir: str, title_suffix: str = "ALL") -> None:
-    os.makedirs(outdir, exist_ok=True)
-    pl = trades_df['AdjustedNetPL'].fillna(0.0)
-    equity = cfg.initial_capital + pl.cumsum()
-    plt.figure(figsize=(9, 4.5))
-    plt.plot(equity.index, equity.values)
-    plt.ylabel("Equity ($)")
-    plt.xlabel("Trade #")
-    plt.title(f"Equity Curve — {cfg.strategy_name} ({cfg.timeframe}) [{title_suffix}]")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"equity_curve_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
-    plt.close()
-    dd = equity / equity.cummax() - 1.0
-    plt.figure(figsize=(9, 4.5))
-    plt.plot(dd.index, dd.values * 100.0)
-    plt.ylabel("Drawdown (%)")
-    plt.xlabel("Trade #")
-    plt.title(f"Drawdown Curve [{title_suffix}]")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"drawdown_curve_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
-    plt.close()
-    plt.figure(figsize=(9, 4.5))
-    plt.hist(trades_df['AdjustedNetPL'].dropna().values, bins=30)
-    plt.xlabel("Net P/L per Trade ($)")
-    plt.ylabel("Count")
-    plt.title(f"Trade P/L Distribution [{title_suffix}]")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"pl_histogram_{title_suffix.lower()}.png"), dpi=160, bbox_inches='tight')
-    plt.close()
-    dt = pd.to_datetime(trades_df['ExitTime'], errors='coerce')
-    monthly = pd.DataFrame({'NetPL': trades_df['AdjustedNetPL'].values}, index=dt)
-    monthly = monthly.dropna().resample('ME').sum()
-    monthly['ReturnPct'] = monthly['NetPL'] / cfg.initial_capital * 100.0
-    monthly.to_csv(os.path.join(outdir, f"monthly_performance_{title_suffix.lower()}.csv"))
-
 def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str) -> None:
     os.makedirs(outdir, exist_ok=True)
     m = metrics
@@ -323,7 +232,6 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 **Date Range:** {first_dt_all.date() if pd.notna(first_dt_all) else 'n/a'} → {last_dt_all.date() if pd.notna(last_dt_all) else 'n/a'}  
 **Timeframe:** {m.get('timeframe')}  
 **Run Date:** {datetime.now().strftime('%Y-%m-%d')}  
-**P/L Basis:** SL-adjusted net P/L (cap −$100 per trade including commissions)  
 
 **Trades:** ALL = {int(m.get('num_trades_all', 0))} | RTH = {int(m.get('num_trades_rth', 0))}
 
@@ -334,7 +242,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Total Return:** {_fmt(m.get('total_return_pct'), pct=True)}
 - **Win Rate:** {_fmt(m.get('win_rate_pct'), pct=True)}
 - **Profit Factor:** {_fmt(m.get('profit_factor'))}
-- **Max Drawdown:** ${_fmt(m.get('max_drawdown_pct'), pct=True)}
+- **Max Drawdown:** {_fmt(m.get('max_drawdown_pct'), pct=True)}
 - **Total Trades:** {int(m.get('num_trades', 0))}
 
 ---
@@ -349,20 +257,6 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Sharpe Ratio:** {_fmt(m.get('sharpe_ratio'))}
 
 ---
-
-## RTH Snapshot (09:30–16:00 ET)
-- **Net Profit (RTH):** ${_fmt(m.get('RTH_net_profit'))}
-- **Win Rate (RTH):** {_fmt(m.get('RTH_win_rate_pct'), pct=True)}
-- **Profit Factor (RTH):** {_fmt(m.get('RTH_profit_factor'))}
-- **Max Drawdown (RTH):** ${_fmt(m.get('RTH_max_drawdown_pct'), pct=True)}
-- **Total Trades (RTH):** {int(m.get('num_trades_rth', 0))}
-
----
-
-## Charts
-![Equity Curve](equity_curve_all.png)
-![Drawdown Curve](drawdown_curve_all.png)
-![Trade P/L Distribution](pl_histogram_all.png)
 
 *Report generated by Backtester v{cfg.version}*
 """
@@ -406,7 +300,6 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
             metrics_all[f"RTH_{k}"] = v
         with open(os.path.join(outdir, "metrics.json"), "w") as f:
             json.dump(metrics_all, f, indent=2)
-        save_visuals_and_tables(trades_all, cfg, outdir)
         generate_analytics_md(trades_all, trades_rth, metrics_all, cfg, outdir)
         def print_metrics(m):
             print(f"Strategy: {m.get('strategy', 'Unknown')}")
@@ -430,9 +323,6 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
         results.append({"instrument": instr, "metrics": metrics_all, "outdir": outdir})
     return results
 
-# =========================
-# Main
-# =========================
 if __name__ == "__main__":
     import argparse, glob, sys
     parser = argparse.ArgumentParser(description="Backtest TOS Strategy Report CSV")
