@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # Backtester_vercel.py
-# Hybrid Backtester v1.4.2 (Vercel-friendly, no timeframe arg)
+# Hybrid Backtester v1.4.2 (Vercel-friendly, accepts --timeframe but ignores it)
 
 import os, io, re, json, glob, sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, time
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
@@ -276,6 +276,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Backtester with analytics (Vercel-friendly)")
     parser.add_argument("--csv", nargs="+", required=True, help="Path(s) to TOS CSV(s)")
+    parser.add_argument("--timeframe", type=str, default="180d:15m", help="(ignored, kept for compatibility)")
     parser.add_argument("--capital", type=float, default=2500.0, help="Initial capital")
     parser.add_argument("--commission", type=float, default=4.04, help="Commission per round trip")
     parser.add_argument("--point_value", type=float, default=5.0, help="Point value ($ per point per contract)")
