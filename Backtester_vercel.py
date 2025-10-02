@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 # ==========================================================
-# Backtester_vercel.py v1.6.2 (Hardened)
-# - Guarantees NetPL exists in all DataFrames
-# - Fixes KeyError: 'NetPL'
+# Backtester_vercel.py v1.6.3 (Hardened Full Schema)
+# - Guarantees NetPL/AdjustedNetPL always exist
+# - Guarantees compute_metrics always returns full schema
+# - Fixes KeyError: 'net_profit'
 # ==========================================================
 
 import os, io, re, json, argparse, glob, sys
@@ -27,7 +28,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.6.2"
+    version: str = "1.6.3"
     algo_params: dict = None
     def __post_init__(self):
         if self.algo_params is None:
@@ -56,11 +57,13 @@ def _parse_datetime(series: pd.Series) -> pd.Series:
     return parsed
 
 def _max_drawdown(equity_curve: pd.Series) -> float:
+    if equity_curve.empty: return 0.0
     running_max = equity_curve.cummax()
     drawdown = equity_curve / running_max - 1.0
     return float(drawdown.min())
 
 def _profit_factor(pl: pd.Series) -> float:
+    if pl.empty: return 0.0
     s = pl.dropna()
     gp = s[s > 0].sum()
     gl = -s[s < 0].sum()
@@ -142,7 +145,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float):
                 "TradePL": trade_pl,
                 "Commission": commission,
                 "NetPL": net_pl,
-                "AdjustedNetPL": net_pl,  # ✅ ensure exists
+                "AdjustedNetPL": net_pl,
                 "ExitReason": _exit_reason(exit_.get("Side")),
                 "Direction": direction,
                 "QtyAbs": qty_abs
@@ -155,7 +158,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float):
         t=pd.DataFrame(trades)
         t["HoldMins"]=(t["ExitTime"]-t["EntryTime"]).dt.total_seconds()/60.0
     else:
-        # ✅ guarantee schema even if empty
+        # ✅ always return full schema
         t=pd.DataFrame(columns=["EntryTime","ExitTime","TradePL","Commission",
                                 "NetPL","AdjustedNetPL","ExitReason","Direction",
                                 "QtyAbs","HoldMins"])
@@ -166,9 +169,10 @@ def build_trades(df: pd.DataFrame, commission_rt: float):
 # =========================
 def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float):
     df=trades.copy()
-    # ✅ safety guard: if NetPL missing, create it
     if "NetPL" not in df.columns:
         df["NetPL"]=0.0
+    if "AdjustedNetPL" not in df.columns:
+        df["AdjustedNetPL"]=df["NetPL"]
     df["RawLossExceeds100"]=df["NetPL"]<-100.0
     df["AdjustedNetPL"]=np.where(df["NetPL"]<-100.0,-100.0,df["NetPL"])
     df["PointsPerContract"]=np.where(df.get("QtyAbs",1)>0,
@@ -177,30 +181,47 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float):
     return df
 
 # =========================
-# Compute Metrics
+# Compute Metrics (always full schema)
 # =========================
 def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str, non_rth_trades=0):
+    # ✅ full schema defaults
+    metrics = {
+        "scope": scope_label,
+        "strategy_name": cfg.strategy_name,
+        "num_trades": 0,
+        "net_profit": 0.0,
+        "profit_factor": 0.0,
+        "win_rate_pct": 0.0,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "expectancy": 0.0,
+        "max_drawdown_pct": 0.0,
+        "sharpe_ratio": 0.0,
+        "stoploss_hits": 0,
+        "avg_hold_mins": 0.0
+    }
     if trades_df.empty:
-        return {"scope":scope_label,"strategy_name":cfg.strategy_name,"num_trades":0}
+        return metrics
+
     df=trades_df.copy()
     pl=df["AdjustedNetPL"]
     equity=cfg.initial_capital+pl.cumsum()
     wins, losses = pl[pl>0], pl[pl<0]
-    return {
-        "scope":scope_label,
-        "strategy_name":cfg.strategy_name,
-        "num_trades":len(df),
-        "net_profit":float(pl.sum()),
-        "profit_factor":_profit_factor(pl),
-        "win_rate_pct":float((pl>0).mean()*100.0),
-        "avg_win":float(wins.mean()) if not wins.empty else 0.0,
-        "avg_loss":float(losses.mean()) if not losses.empty else 0.0,
-        "expectancy":float(pl.mean()),
-        "max_drawdown_pct":abs(_max_drawdown(equity))*100.0,
-        "sharpe_ratio":float(pl.mean()/pl.std()) if pl.std()!=0 else 0.0,
-        "stoploss_hits":int((df["RawLossExceeds100"]).sum()),
-        "avg_hold_mins":float(df["HoldMins"].mean()) if "HoldMins" in df else 0.0
-    }
+
+    metrics.update({
+        "num_trades": len(df),
+        "net_profit": float(pl.sum()),
+        "profit_factor": _profit_factor(pl),
+        "win_rate_pct": float((pl>0).mean()*100.0),
+        "avg_win": float(wins.mean()) if not wins.empty else 0.0,
+        "avg_loss": float(losses.mean()) if not losses.empty else 0.0,
+        "expectancy": float(pl.mean()),
+        "max_drawdown_pct": abs(_max_drawdown(equity))*100.0,
+        "sharpe_ratio": float(pl.mean()/pl.std()) if pl.std()!=0 else 0.0,
+        "stoploss_hits": int((df["RawLossExceeds100"]).sum()),
+        "avg_hold_mins": float(df["HoldMins"].mean()) if "HoldMins" in df else 0.0
+    })
+    return metrics
 
 # =========================
 # Save Visuals
@@ -300,5 +321,5 @@ if __name__=="__main__":
     sys.exit(0)
 
 # =========================
-# End of Backtester_vercel.py v1.6.2
+# End of Backtester_vercel.py v1.6.3
 # =========================
