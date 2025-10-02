@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Backtester_vercel.py v1.4
 # /MES only, stoploss capped at 20 points ($100), multi-strategy supported
-# Weekly + Monthly performance tables included
+# Weekly + Monthly performance tables included, PDF-style markdown output
 
 import os
 import io
@@ -386,6 +386,39 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
 
 if __name__ == "__main__":
     import argparse, glob, sys
+
     parser = argparse.ArgumentParser(description="Backtester for TOS Strategy Report CSVs.")
-    parser.add_argument("--csv", nargs="+", required=True)
-    parser.add_argument("--capital", type=float, default
+    parser.add_argument("--csv", nargs="+", required=True, help="Path(s) to TOS Strategy Report CSV file(s).")
+    parser.add_argument("--capital", type=float, default=2500.0, help="Initial capital.")
+    parser.add_argument("--commission", type=float, default=4.04, help="Commission per contract round trip.")
+    parser.add_argument("--point_value", type=float, default=5.0, help="Point value for /MES (default $5).")
+    parser.add_argument("--timeframe", type=str, default="180d:15m", help="Label for timeframe.")
+
+    args = parser.parse_args()
+
+    cfg = BacktestConfig(
+        timeframe=args.timeframe,
+        initial_capital=args.capital,
+        commission_per_round_trip=args.commission,
+        point_value=args.point_value
+    )
+
+    # resolve file paths
+    resolved = []
+    for item in args.csv:
+        matches = glob.glob(item)
+        if matches:
+            resolved.extend(matches)
+        else:
+            resolved.append(item)
+
+    csv_paths = sorted({str(Path(p)) for p in resolved if Path(p).exists()})
+    if not csv_paths:
+        print(f"[ERROR] No CSV files matched: {args.csv}", file=sys.stderr)
+        sys.exit(1)
+
+    for csv_path in csv_paths:
+        print(f"\n[RUN] CSV: {csv_path}")
+        trades, metrics, outdir = run_backtest(csv_path, cfg)
+        print(json.dumps(metrics, indent=2))
+        print(f"Results saved to {outdir}")
