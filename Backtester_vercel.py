@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # Backtester_vercel.py
-# Simplified backtester with analytics, Vercel-friendly
+# Backtester with analytics, Vercel-friendly
 
-import os, io, re, json, glob, sys
-from dataclasses import dataclass, asdict
-from datetime import datetime, time
+import os, io, re, json, glob
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,11 +23,10 @@ class BacktestConfig:
     strategy_name: str = ""
     instruments: Tuple[str, ...] = ("/MES",)
     timeframe: str = "180d:15m"
-    session_hours_rth: Tuple[str, str] = ("09:30", "16:00")
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.3.1"
+    version: str = "1.3.3"
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path("/tmp")
@@ -182,13 +181,12 @@ def apply_stoploss_corrections(trades: pd.DataFrame, point_value: float) -> pd.D
 # Metrics
 # =========================
 
-def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig, scope_label: str) -> dict:
+def compute_metrics(trades_df: pd.DataFrame, cfg: BacktestConfig) -> dict:
     df = trades_df.copy()
     pl_net = df["AdjustedNetPL"].fillna(0.0)
     equity = cfg.initial_capital + pl_net.cumsum()
     total_net = float(pl_net.sum())
     return {
-        "scope": scope_label,
         "strategy_name": cfg.strategy_name,
         "version": cfg.version,
         "timeframe": cfg.timeframe,
@@ -213,15 +211,12 @@ def save_visuals(trades_df: pd.DataFrame, cfg: BacktestConfig, outdir: str):
     equity = cfg.initial_capital + pl.cumsum()
     dd = equity / equity.cummax() - 1.0
 
-    # Equity curve
     plt.figure(figsize=(9,4.5)); plt.plot(equity.index, equity.values)
     plt.title("Equity Curve"); plt.savefig(os.path.join(outdir,"equity_curve_all.png")); plt.close()
 
-    # Drawdown
     plt.figure(figsize=(9,4.5)); plt.plot(dd.index, dd.values*100)
     plt.title("Drawdown Curve"); plt.savefig(os.path.join(outdir,"drawdown_curve_all.png")); plt.close()
 
-    # Histogram
     plt.figure(figsize=(9,4.5)); plt.hist(trades_df["AdjustedNetPL"].dropna().values,bins=30)
     plt.title("Trade P/L Distribution"); plt.savefig(os.path.join(outdir,"pl_histogram_all.png")); plt.close()
 
@@ -265,7 +260,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     for instr in symbols:
         trades = build_trades(raw, cfg.commission_per_round_trip)
         trades = apply_stoploss_corrections(trades, cfg.point_value)
-        metrics = compute_metrics(trades, cfg, "ALL")
+        metrics = compute_metrics(trades, cfg)
         metrics["instrument"] = instr
         outdir = cfg.outdir(csv_stem, instr, cfg.strategy_name or "Unknown")
         os.makedirs(outdir, exist_ok=True)
@@ -280,13 +275,22 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Backtester with analytics (Vercel-friendly)")
     parser.add_argument("--csv", nargs="+", required=True, help="Path(s) to TOS CSV(s)")
-    parser.add_argument("--capital", type=float, default=2500.0)
-    parser.add_argument("--commission", type=float, default=4.04)
-    parser.add_argument("--point_value", type=float, default=5.0)
+    parser.add_argument("--timeframe", type=str, default="180d:15m", help="Timeframe label for outputs")
+    parser.add_argument("--capital", type=float, default=2500.0, help="Initial capital")
+    parser.add_argument("--commission", type=float, default=4.04, help="Commission per round trip")
+    parser.add_argument("--point_value", type=float, default=5.0, help="Point value ($ per point per contract)")
     args = parser.parse_args()
-    cfg = BacktestConfig(initial_capital=args.capital, commission_per_round_trip=args.commission, point_value=args.point_value)
+
+    cfg = BacktestConfig(
+        timeframe=args.timeframe,
+        initial_capital=args.capital,
+        commission_per_round_trip=args.commission,
+        point_value=args.point_value,
+    )
+
     for item in args.csv:
         for csv_path in glob.glob(item):
             print(f"\n[RUN] {csv_path}")
             results = run_backtest(csv_path, cfg)
-            for r in results: print(json.dumps(r["metrics"], indent=2))
+            for r in results:
+                print(json.dumps(r["metrics"], indent=2))
