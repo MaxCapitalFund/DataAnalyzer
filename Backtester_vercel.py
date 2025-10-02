@@ -1,9 +1,12 @@
-# Clean and transform the user's CSV to the requested format
+# Re-parse with Strategy tags considered for entry/exit classification
 
-# Shorten strategy names (remove tags like (STO Entry), (BTC Stop), etc.)
-df["StrategyClean"] = df["Strategy"].astype(str).str.split("(").str[0].str.strip()
+df2 = df.copy()
 
-# Normalize Side into 4 codes
+# Extract BaseStrategy and Tag from Strategy column
+df2["BaseStrategy"] = df2["Strategy"].astype(str).str.split("(").str[0].str.strip()
+df2["Tag"] = df2["Strategy"].astype(str).str.extract(r"\(([^()]*)\)", expand=False).fillna("")
+
+# Normalize Side to 4 codes again
 def normalize_side(val: str) -> str:
     if not isinstance(val, str):
         return ""
@@ -18,29 +21,39 @@ def normalize_side(val: str) -> str:
         return "BTC"
     return v.strip()
 
-df["Side"] = df["Side"].map(normalize_side)
+df2["SideNorm"] = df2["Side"].map(normalize_side)
 
-# Split Date/Time column into Date and Time
-if "Date/Time" in df.columns:
-    dt = pd.to_datetime(df["Date/Time"], errors="coerce")
-    df["Date"] = dt.dt.date
-    df["Time"] = dt.dt.time
+# Clean date/time split
+if "Date/Time" in df2.columns:
+    dt = pd.to_datetime(df2["Date/Time"], errors="coerce")
+    df2["Date"] = dt.dt.date
+    df2["Time"] = dt.dt.time
 
-# Keep only relevant columns
-clean_df = df[["Id", "StrategyClean", "Side", "Quantity", "Price", "Date", "Time", "Trade P/L"]].copy()
-clean_df.rename(columns={"StrategyClean": "Strategy", "Trade P/L": "TradePL"}, inplace=True)
+# Build trades by sequencing through rows per BaseStrategy, pairing entries with exits
+trade_counts = {}
+total_trades = 0
 
-# Count round trips: pair BTO->STC and STO->BTC sequentially (ignoring Id since ToS assigns new Id each leg)
-round_trips = 0
-open_side = None
+for strat, grp in df2.groupby("BaseStrategy"):
+    grp_sorted = grp.sort_values("Date")
+    sides = grp_sorted["SideNorm"].tolist()
+    tags = grp_sorted["Tag"].tolist()
+    
+    trades = 0
+    open_side = None
+    
+    for s, t in zip(sides, tags):
+        if s in ("BTO", "STO"):
+            open_side = s
+        elif s in ("STC", "BTC") and open_side:
+            # Match long exit (BTO->STC) or short exit (STO->BTC)
+            if (open_side == "BTO" and s == "STC") or (open_side == "STO" and s == "BTC"):
+                trades += 1
+                open_side = None
+            else:
+                # skip mismatches
+                open_side = None
+    
+    trade_counts[strat] = trades
+    total_trades += trades
 
-for _, row in clean_df.iterrows():
-    side = row["Side"]
-    if side in ("BTO", "STO"):
-        open_side = side
-    elif side in ("STC", "BTC") and open_side:
-        if (open_side == "BTO" and side == "STC") or (open_side == "STO" and side == "BTC"):
-            round_trips += 1
-            open_side = None
-
-(clean_df.head(12), round_trips)
+trade_counts, total_trades
