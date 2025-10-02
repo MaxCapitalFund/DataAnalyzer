@@ -4,11 +4,12 @@
 # Combines comprehensive metrics, visuals, and robustness with serverless efficiency
 # - Stop-loss cap: -$100 per trade per contract
 # - Outputs: trades_enriched.csv, metrics.json, analytics.md, config.json, 4 charts
-# - Updates (v1.5.1): 
+# - Updates (v1.5.2): 
 #   - Uses CSV file name as strategy_name (e.g., MaxAlgo_v1_SupSig_v7)
-#   - Includes all trades (Premarket45, RTH15, after-hours), removes RTH15 filter
-#   - Fixes stop-loss detection for STC Loss Limit, BTC Loss Limit
-#   - Aligns with PreMarket45 (03:00–09:15 ET) and Open15 (09:45–15:30 ET) timeframes
+#   - Combines STC Loss Limit, BTC Loss Limit with STC Stop, BTC Stop for stop-loss detection
+#   - Includes all trades (Premarket45: 03:00–09:15 ET, RTH15: 09:45–15:30 ET, after-hours)
+#   - Updated session tagging for Premarket45 and after-hours
+#   - Fixed strategy name display to use CSV name in all outputs
 #   - Verified on MaxAlgo_v1_SupSig_v7_MES_10125.csv (950 orders → 475 trades)
 
 import os
@@ -38,7 +39,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.5.1"  # Updated version
+    version: str = "1.5.2"  # Updated version
     algo_params: dict = None  # Store algo inputs
     def __post_init__(self):
         if self.algo_params is None:
@@ -147,7 +148,7 @@ def normalize_symbol(sym: str) -> str:
 # =========================
 # Load & Clean (TOS Strategy Report)
 # =========================
-def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
+def load_tos_strategy_report(file_path: str, cfg: BacktestConfig) -> pd.DataFrame:
     with open(file_path, 'r', errors='replace') as f:
         lines = f.readlines()
     start_idx = None
@@ -175,11 +176,7 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     else:
         df['TradePL'] = 0.0
     df['CumPL'] = _to_float(df['P/L']) if 'P/L' in df.columns else np.nan
-    if 'Strategy' in df.columns:
-        base = df['Strategy'].astype(str).str.split('(').str[0].str.strip()
-        df['BaseStrategy'] = base
-    else:
-        df['BaseStrategy'] = "Unknown"
+    df['BaseStrategy'] = cfg.strategy_name  # Use CSV name as BaseStrategy
     side_col = None
     for cand in ['Side', 'Action', 'Order', 'Type']:
         if cand in df.columns:
@@ -867,7 +864,7 @@ def run_backtest_for_instrument(df_raw: pd.DataFrame, instrument: Optional[str],
 # =========================
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(tos_csv_path).stem.replace(' ', '_')
-    raw = load_tos_strategy_report(tos_csv_path)
+    raw = load_tos_strategy_report(tos_csv_path, cfg)
     if 'Symbol' in raw.columns:
         raw['Symbol'] = raw['Symbol'].map(normalize_symbol)
     else:
@@ -917,7 +914,7 @@ if __name__ == "__main__":
         initial_capital=args.capital,
         commission_per_round_trip=args.commission,
         point_value=args.point_value,
-        version="1.5.1",
+        version="1.5.2",
     )
     all_metrics = []
     for csv_path in csv_paths:
