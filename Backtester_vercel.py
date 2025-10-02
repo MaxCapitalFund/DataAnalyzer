@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Backtester_vercel.py v1.4
-# /MES only, stoploss capped at 20 points ($100), multi-strategy supported
+# /MES only, stoploss capped at 20 points ($100), multi-strategy supported, PDF-style markdown output
 
 import os
 import io
@@ -163,11 +163,9 @@ def build_trades(df: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
         entry_qty = _safe_num(entry.get('Qty', 1))
         qty_abs = abs(entry_qty) if pd.notna(entry_qty) else 1.0
 
-        # Direction from ParsedTag
         direction = "Long" if "BTO" in entry.get('ParsedTag','').upper() else \
                     "Short" if "STO" in entry.get('ParsedTag','').upper() else "Unknown"
 
-        # Exit reason
         parsed_exit = str(exit_.get('ParsedTag','')).upper()
         if "TARGET" in parsed_exit or "PROFIT" in parsed_exit or "TP" in parsed_exit:
             exit_reason = "Target"
@@ -189,10 +187,7 @@ def build_trades(df: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
         commission = cfg.commission_per_round_trip * qty_abs
         net_pl = adj_gross - commission
 
-        # Session tagging
         sess = _tag_session(entry['Date'])
-
-        # Forced closes
         if sess == "PRE" and exit_['Date'].time() > PRE_END:
             exit_reason = "Premarket Close (09:15)"
         if sess.startswith("RTH") and exit_['Date'].time() > AUTO_CLOSE:
@@ -204,8 +199,6 @@ def build_trades(df: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
             "ParsedTag": entry.get('ParsedTag',''),
             "EntryTime": entry['Date'],
             "ExitTime": exit_['Date'],
-            "EntryPrice": _safe_num(entry.get('Price')),
-            "ExitPrice": _safe_num(exit_.get('Price')),
             "QtyAbs": qty_abs,
             "GrossPL": gross_pl,
             "AdjGrossPL": adj_gross,
@@ -258,7 +251,6 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig, csv_file: str) ->
     combined = _metrics(trades)
     results["combined"] = combined
 
-    # Preserve order of appearance
     seen = []
     for strat in trades['BaseStrategy']:
         if strat not in seen:
@@ -295,42 +287,60 @@ def generate_analytics_md(metrics: dict, cfg: BacktestConfig, outdir: str) -> No
 **Strategies Found:** {", ".join(strat_names)}  
 **Instrument:** {cfg.instrument}  
 **Timeframe:** {cfg.timeframe}  
-**Inputs:** [Not Provided in CSV — optional user annotation]  
 
-Run Date: {datetime.now().strftime('%Y-%m-%d')}  
-Initial Capital: ${_fmt(cfg.initial_capital,0)}  
-Commission (RT/contract): ${_fmt(cfg.commission_per_round_trip,2)}  
-Total Commissions Paid: ${_fmt(m_all.get('total_commissions'),2)}  
+Run Date:** {datetime.now().strftime('%Y-%m-%d')}  
+Session Basis:** New York time (ET). Metrics Scope: RTH (09:30–16:00)  
+Initial Capital:** ${_fmt(cfg.initial_capital,0)}  
+Commission (RT / contract):** ${_fmt(cfg.commission_per_round_trip,2)}  
+Total Commissions Paid:** ${_fmt(m_all.get('total_commissions'),2)}  
 
 ---
 
 ## Key Performance Indicators (All Strategies Combined)
-- Net Profit: ${_fmt(m_all.get('net_profit'))}
-- Total Return: {_fmt(m_all.get('total_return_pct'), pct=True)}
-- Win Rate: {_fmt(m_all.get('win_rate_pct'), pct=True)}
-- Profit Factor: {_fmt(m_all.get('profit_factor'))}
-- Max Drawdown: ${_fmt(m_all.get('max_drawdown_dollars'))} ({_fmt(m_all.get('max_drawdown_pct'), pct=True)})
-- Total Trades: {int(m_all.get('num_trades',0))}
+• **Net Profit (adjusted):** ${_fmt(m_all.get('net_profit'))}  
+• **Total Return:** {_fmt(m_all.get('total_return_pct'), pct=True)}  
+• **Win Rate:** {_fmt(m_all.get('win_rate_pct'), pct=True)}  
+• **Profit Factor:** {_fmt(m_all.get('profit_factor'))}  
+• **Max Drawdown:** ${_fmt(m_all.get('max_drawdown_dollars'))} ({_fmt(m_all.get('max_drawdown_pct'), pct=True)})  
+• **Total Trades:** {int(m_all.get('num_trades',0))}  
 
 ---
 
-## Performance by Strategy
+## Performance Details (All Strategies Combined)
+• **Average Win:** ${_fmt(m_all.get('avg_win_dollars'))}  
+• **Average Loss:** ${_fmt(m_all.get('avg_loss_dollars'))}  
+• **Expectancy per Trade:** ${_fmt(m_all.get('expectancy_per_trade_dollars'))}  
+• **Largest Win:** ${_fmt(m_all.get('largest_winning_trade'))}  
+• **Largest Loss:** ${_fmt(m_all.get('largest_losing_trade'))}  
+• **Recovery Factor:** {_fmt(m_all.get('recovery_factor'))}  
+
+---
 """
 
     for strat, vals in metrics["strategies"].items():
         md += f"""
-### {strat}
-- Net Profit: ${_fmt(vals.get('net_profit'))}
-- Total Return: {_fmt(vals.get('total_return_pct'), pct=True)}
-- Win Rate: {_fmt(vals.get('win_rate_pct'), pct=True)}
-- Profit Factor: {_fmt(vals.get('profit_factor'))}
-- Trades: {int(vals.get('num_trades',0))}
+## {strat} (Individual Performance)
+
+### Key Performance Indicators
+• **Net Profit (adjusted):** ${_fmt(vals.get('net_profit'))}  
+• **Total Return:** {_fmt(vals.get('total_return_pct'), pct=True)}  
+• **Win Rate:** {_fmt(vals.get('win_rate_pct'), pct=True)}  
+• **Profit Factor:** {_fmt(vals.get('profit_factor'))}  
+• **Max Drawdown:** ${_fmt(vals.get('max_drawdown_dollars'))} ({_fmt(vals.get('max_drawdown_pct'), pct=True)})  
+• **Total Trades:** {int(vals.get('num_trades',0))}  
+
+### Performance Details
+• **Average Win:** ${_fmt(vals.get('avg_win_dollars'))}  
+• **Average Loss:** ${_fmt(vals.get('avg_loss_dollars'))}  
+• **Expectancy per Trade:** ${_fmt(vals.get('expectancy_per_trade_dollars'))}  
+• **Largest Win:** ${_fmt(vals.get('largest_winning_trade'))}  
+• **Largest Loss:** ${_fmt(vals.get('largest_losing_trade'))}  
+• **Recovery Factor:** {_fmt(vals.get('recovery_factor'))}  
+
+---
 """
 
     md += f"""
-
----
-
 *Report generated by Backtester_vercel.py v{cfg.version}*
 """
     with open(os.path.join(outdir, "analytics.md"), "w", encoding="utf-8") as f:
@@ -349,6 +359,13 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     outdir = cfg.outdir(csv_stem, trades['BaseStrategy'].iloc[0] if len(trades) else "Unknown")
     os.makedirs(outdir, exist_ok=True)
     trades.to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
+
+    # monthly table
+    dt = pd.to_datetime(trades['ExitTime'], errors='coerce')
+    monthly = pd.DataFrame({'NetPL': trades['NetPL'].values}, index=dt)
+    monthly = monthly.dropna().resample('M').sum()
+    monthly['ReturnPct'] = monthly['NetPL'] / cfg.initial_capital * 100.0
+    monthly.to_csv(os.path.join(outdir, "monthly_performance.csv"))
 
     metrics = compute_metrics(trades, cfg, csv_file)
     with open(os.path.join(outdir, "metrics.json"), "w") as f:
@@ -384,11 +401,4 @@ if __name__ == "__main__":
         else: resolved.append(item)
 
     csv_paths = sorted({str(Path(p)) for p in resolved if Path(p).exists()})
-    if not csv_paths:
-        print(f"[ERROR] No CSV files matched: {args.csv}", file=sys.stderr)
-        sys.exit(1)
-
-    for csv_path in csv_paths:
-        print(f"\n[RUN] CSV: {csv_path}")
-        trades, metrics, outdir = run_backtest(csv_path, cfg)
-        print(json.dumps(metrics, indent=2))
+    if not
