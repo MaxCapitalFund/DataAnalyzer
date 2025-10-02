@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 # Backtester_vercel.py
 # Clean, robust version — Vercel-ready
-# Outputs: trades_enriched.csv, metrics.json, analytics.md
+# Outputs: trades_enriched.csv, metrics.json, analytics.md (NO charts)
+
 import os
 import io
 import re
@@ -24,12 +25,11 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.7"
+    version: str = "1.6-nocharts"
     def outdir(self, csv_stem: str, instrument: str) -> str:
         temp_dir = Path('/tmp')
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_instr = instrument.replace("/", "")
-        print(f"[DEBUG] Outdir = Backtests_{ts}_{safe_instr}_{csv_stem}")
         return str(temp_dir / f"Backtests_{ts}_{safe_instr}_{csv_stem}")
 
 # =========================
@@ -152,6 +152,14 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                 exit_ = after_entry_close.iloc[0] if len(after_entry_close) else close_rows.iloc[-1]
                 entry_qty = _safe_num(entry.get('Qty'))
                 qty_abs = abs(entry_qty) if pd.notna(entry_qty) and entry_qty != 0 else 1.0
+                direction = 'Unknown'
+                es = str(entry.get('Side', '')).upper()
+                if re.search(r"\b(BTO|BUY TO OPEN|BUY_TO_OPEN|BOT TO OPEN)\b", es):
+                    direction = 'Long'
+                elif re.search(r"\b(STO|SELL TO OPEN|SELL_TO_OPEN|SELL SHORT)\b", es):
+                    direction = 'Short'
+                elif pd.notna(entry_qty):
+                    direction = 'Long' if entry_qty > 0 else 'Short'
                 trade_pl = _safe_num(exit_.get('TradePL'))
                 commission = commission_rt * qty_abs
                 net_pl = (trade_pl if pd.notna(trade_pl) else 0.0) - commission
@@ -159,16 +167,22 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
                     'Id': tid,
                     'EntryTime': entry['Date'],
                     'ExitTime': exit_['Date'],
+                    'EntryPrice': _safe_num(entry.get('Price')),
+                    'ExitPrice': _safe_num(exit_.get('Price')),
+                    'EntryQty': entry_qty,
+                    'ExitQty': _safe_num(exit_.get('Qty')),
+                    'QtyAbs': qty_abs,
                     'TradePL': trade_pl,
                     'Commission': commission,
                     'NetPL': net_pl,
+                    'BaseStrategy': entry.get('BaseStrategy', 'Unknown'),
+                    'StrategyRaw': entry.get('Strategy', ''),
+                    'Symbol': entry.get('Symbol', '/UNK'),
+                    'EntrySide': str(entry.get('Side', '')),
+                    'ExitSide': str(exit_.get('Side', '')),
+                    'ExitReason': _exit_reason(exit_.get('Side') or exit_.get('Type') or exit_.get('Order'))
                 })
-    t = pd.DataFrame(trades)
-    if t.empty:
-        return t.assign(HoldMins=np.nan)
-    t = t.sort_values('ExitTime').reset_index(drop=True)
-    t['HoldMins'] = (t['ExitTime'] - t['EntryTime']).dt.total_seconds() / 60.0
-    return t
+    return pd.DataFrame(trades).sort_values('ExitTime').reset_index(drop=True)
 
 # =========================
 # Stop-loss
@@ -232,6 +246,7 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 **Date Range:** {first_dt_all.date() if pd.notna(first_dt_all) else 'n/a'} → {last_dt_all.date() if pd.notna(last_dt_all) else 'n/a'}  
 **Timeframe:** {m.get('timeframe')}  
 **Run Date:** {datetime.now().strftime('%Y-%m-%d')}  
+**P/L Basis:** SL-adjusted net P/L (cap −$100 per trade including commissions)  
 
 **Trades:** ALL = {int(m.get('num_trades_all', 0))} | RTH = {int(m.get('num_trades_rth', 0))}
 
@@ -255,6 +270,15 @@ def generate_analytics_md(trades_all: pd.DataFrame, trades_rth: pd.DataFrame, me
 - **Expectancy:** ${_fmt(m.get('expectancy'))}
 - **Recovery Factor:** {_fmt(m.get('recovery_factor'))}
 - **Sharpe Ratio:** {_fmt(m.get('sharpe_ratio'))}
+
+---
+
+## RTH Snapshot (09:30–16:00 ET)
+- **Net Profit (RTH):** ${_fmt(m.get('RTH_net_profit'))}
+- **Win Rate (RTH):** {_fmt(m.get('RTH_win_rate_pct'), pct=True)}
+- **Profit Factor (RTH):** {_fmt(m.get('RTH_profit_factor'))}
+- **Max Drawdown (RTH):** {_fmt(m.get('RTH_max_drawdown_pct'), pct=True)}
+- **Total Trades (RTH):** {int(m.get('num_trades_rth', 0))}
 
 ---
 
