@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Backtester_vercel.py — FINAL VERIFIED VERSION (with /tmp fix and error handling)
+# Backtester_vercel.py — CLEAN ERROR-FREE VERSION
 # Author: GPT-5 for Larry Poe
 # Description:
 # Parses ThinkorSwim Strategy Report CSV (Trade P/L, P/L)
@@ -22,13 +22,13 @@ import pandas as pd
 # =========================
 @dataclass
 class BacktestConfig:
-    strategy_name: str = ""
+    strategy_name: str = "Unknown"
     instruments: Tuple[str, ...] = ("/MES",)
     timeframe: str = "180d:15m"
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.3.8"
+    version: str = "1.3.9"
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path("/tmp")
         day = datetime.now().strftime("%Y-%m-%d")
@@ -71,16 +71,41 @@ def _profit_factor(pl: pd.Series) -> float:
 # LOAD & CLEAN
 # =========================
 def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
-    with open(file_path, "r", errors="replace") as f:
-        lines = f.readlines()
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        print(f"DEBUG: Loaded {len(lines)} lines from {file_path}")
+    except FileNotFoundError:
+        print(f"ERROR: Input CSV file not found: {file_path}")
+        raise RuntimeError(f"Input CSV file not found: {file_path}")
+    except Exception as e:
+        print(f"ERROR: Failed to read CSV file {file_path}: {e}")
+        raise RuntimeError(f"Failed to read CSV file {file_path}: {e}")
+    
+    if not lines:
+        print(f"ERROR: CSV file {file_path} is empty")
+        raise RuntimeError(f"CSV file {file_path} is empty")
+    
     start_idx = None
     for i, line in enumerate(lines):
         if line.lstrip().startswith("Id;Strategy;"):
             start_idx = i
             break
     if start_idx is None:
-        raise ValueError("No trade table header found in file.")
-    df = pd.read_csv(io.StringIO("".join(lines[start_idx:])), sep=";")
+        print(f"ERROR: No trade table header found in {file_path}")
+        raise RuntimeError(f"No trade table header found in {file_path}")
+    
+    try:
+        df = pd.read_csv(io.StringIO("".join(lines[start_idx:])), sep=";")
+        print(f"DEBUG: DataFrame shape after loading: {df.shape}")
+    except Exception as e:
+        print(f"ERROR: Failed to parse CSV data: {e}")
+        raise RuntimeError(f"Failed to parse CSV data: {e}")
+    
+    if df.empty:
+        print(f"WARNING: Parsed DataFrame is empty for {file_path}")
+        return df
+    
     # Normalize column names
     df.rename(columns={"Trade P/L": "TradePL", "P/L": "CumPL"}, inplace=True)
     # Parse Date/Time
@@ -102,17 +127,30 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     df["CumPL"] = _to_float(df["CumPL"]) # cumulative
     df["Qty"] = pd.to_numeric(df["Quantity"], errors="coerce")
     df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+    print(f"DEBUG: DataFrame shape after cleaning: {df.shape}")
     return df
 # =========================
 # BUILD TRADES
 # =========================
 def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
+    if df.empty:
+        print("DEBUG: Input DataFrame is empty, no trades to build")
+        return pd.DataFrame(columns=[
+            "Id", "EntryTime", "ExitTime", "EntrySide", "ExitSide",
+            "Direction", "TradePL", "Commission", "NetPL",
+            "BaseStrategy", "Tag", "Session"
+        ])
+    
     trades = []
+    unique_ids = df["Id"].unique()
+    print(f"DEBUG: Grouping by {len(unique_ids)} unique trade IDs")
     for tid, grp in df.groupby("Id", sort=False):
         g = grp.sort_values("Date").copy()
+        print(f"DEBUG: Processing trade ID {tid}, group size: {len(g)}")
         entries = g[g["SideNorm"].isin(["BTO", "STO"])]
         exits = g[g["SideNorm"].isin(["STC", "BTC"])]
         if not len(entries) or not len(exits):
+            print(f"DEBUG: Skipping trade ID {tid}: no valid entry ({len(entries)}) or exit ({len(exits)})")
             continue
         entry = entries.iloc[0]
         exit_ = exits[exits["Date"] >= entry["Date"]].iloc[0] if len(exits[exits["Date"] >= entry["Date"]]) else exits.iloc[-1]
@@ -134,6 +172,7 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
             "Tag": entry["Tag"],
             "Session": _tag_session(entry["Date"])
         })
+    print(f"DEBUG: Built {len(trades)} trades")
     if not trades:
         return pd.DataFrame(columns=[
             "Id", "EntryTime", "ExitTime", "EntrySide", "ExitSide",
@@ -146,31 +185,48 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
 # =========================
 def apply_stoploss_cap(trades: pd.DataFrame, point_value: float) -> pd.DataFrame:
     """Apply $100 (20-point) stop cap to gross TradePL before commission."""
+    if trades.empty:
+        print("DEBUG: Trades DataFrame is empty, skipping stop-loss cap")
+        return trades
     df = trades.copy()
     stop_cap = -100.0 # $100 = 20 pts
     df["SLBreached"] = df["TradePL"] < stop_cap
     df["AdjustedGrossPL"] = np.where(df["SLBreached"], stop_cap, df["TradePL"])
     df["AdjustedNetPL"] = df["AdjustedGrossPL"] - df["Commission"]
     df["PointsPerContract"] = df["AdjustedNetPL"] / point_value
+    print(f"DEBUG: Applied stop-loss cap, DataFrame shape: {df.shape}")
     return df
 # =========================
 # METRICS
 # =========================
 def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
+    metrics = {
+        "strategy": cfg.strategy_name,
+        "version": cfg.version,
+        "num_trades": 0,
+        "net_profit": 0.0,
+        "return_pct": 0.0,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "profit_factor": 0.0,
+        "max_drawdown_pct": 0.0,
+        "max_drawdown_dollars": 0.0,
+        "recovery_factor": 0.0,
+        "win_rate_pct": 0.0
+    }
     if trades.empty:
-        return {}
+        print("DEBUG: No trades to compute metrics, returning default metrics")
+        return metrics
     pl = trades["AdjustedNetPL"].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
     total_net = float(pl.sum())
     total_return_pct = (total_net / cfg.initial_capital) * 100.0
-    avg_win = float(pl[pl > 0].mean()) if any(pl > 0) else 0
-    avg_loss = float(pl[pl < 0].mean()) if any(pl < 0) else 0
+    avg_win = float(pl[pl > 0].mean()) if any(pl > 0) else 0.0
+    avg_loss = float(pl[pl < 0].mean()) if any(pl < 0) else 0.0
     max_dd = abs(_max_drawdown(equity)) * 100.0
     max_dd_dollars = float((equity.cummax() - equity).max())
-    recovery_factor = total_net / max_dd_dollars if max_dd_dollars else np.nan
-    metrics = {
-        "strategy": cfg.strategy_name,
-        "version": cfg.version,
+    recovery_factor = total_net / max_dd_dollars if max_dd_dollars else 0.0
+    metrics.update({
         "num_trades": len(trades),
         "net_profit": total_net,
         "return_pct": total_return_pct,
@@ -181,7 +237,8 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
         "max_drawdown_dollars": max_dd_dollars,
         "recovery_factor": recovery_factor,
         "win_rate_pct": float((pl > 0).mean() * 100.0)
-    }
+    })
+    print(f"DEBUG: Computed metrics: {metrics}")
     return metrics
 # =========================
 # MARKDOWN REPORT
@@ -194,7 +251,7 @@ def save_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConfig, 
         print(f"ERROR: Failed to create directory {outdir}: {e}")
         raise RuntimeError(f"Failed to create directory {outdir}: {e}")
     
-    m = metrics if metrics else {}
+    m = metrics or {}
     md = f"""# Strategy Analysis Report
 **Strategy:** {m.get('strategy', 'Unknown')}
 **Instrument:** /MES
@@ -230,17 +287,25 @@ def save_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConfig, 
 # RUNNER
 # =========================
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
+    metrics = {
+        "status": "failed",
+        "message": "Backtest not started",
+        "strategy": cfg.strategy_name,
+        "version": cfg.version,
+        "num_trades": 0,
+        "net_profit": 0.0
+    }
+    outdir = None
     try:
         csv_stem = Path(tos_csv_path).stem.replace(" ", "_")
+        print(f"DEBUG: Starting backtest with CSV: {tos_csv_path}, stem: {csv_stem}")
         df = load_tos_strategy_report(tos_csv_path)
-        cfg.strategy_name = df["BaseStrategy"].iloc[0] if "BaseStrategy" in df.columns else "Unknown"
+        cfg.strategy_name = df["BaseStrategy"].iloc[0] if "BaseStrategy" in df.columns and not df.empty else cfg.strategy_name
+        print(f"DEBUG: Strategy name set to: {cfg.strategy_name}")
         trades = build_trades(df, cfg.commission_per_round_trip)
+        print(f"DEBUG: Trades DataFrame shape: {trades.shape}")
         trades = apply_stoploss_cap(trades, cfg.point_value)
         metrics = compute_metrics(trades, cfg)
-        
-        if not metrics:
-            print("WARNING: No trades processed, metrics are empty")
-            return {"status": "failed", "message": "No trades processed"}
         
         outdir = cfg.outdir(csv_stem, "/MES", cfg.strategy_name)
         try:
@@ -248,22 +313,26 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
             print(f"DEBUG: Created/verified directory: {outdir}")
         except OSError as e:
             print(f"ERROR: Failed to create directory {outdir}: {e}")
-            raise RuntimeError(f"Failed to create directory {outdir}: {e}")
+            metrics.update({"status": "failed", "message": f"Failed to create directory {outdir}: {e}"})
+            return metrics
         
         try:
             trades.to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
             print(f"DEBUG: Successfully wrote trades_enriched.csv to {outdir}")
         except OSError as e:
             print(f"ERROR: Failed to write trades_enriched.csv to {outdir}: {e}")
-            raise RuntimeError(f"Failed to write trades_enriched.csv to {outdir}: {e}")
+            metrics.update({"status": "failed", "message": f"Failed to write trades_enriched.csv: {e}"})
+            return metrics
         
         save_analytics_md(trades, metrics, cfg, outdir)
+        metrics.update({"status": "success", "message": "Backtest completed"})
         print(f"✅ Backtest complete — {len(trades)} trades | Net P/L ${metrics.get('net_profit', 0):.2f}")
         print(f"📁 Output directory: {outdir}")
         return metrics
     except Exception as e:
         print(f"ERROR: Backtest failed: {str(e)}")
-        return {"status": "failed", "message": str(e)}
+        metrics.update({"status": "failed", "message": f"Backtest failed: {str(e)}"})
+        return metrics
 # =========================
 # MAIN
 # =========================
@@ -281,5 +350,6 @@ if __name__ == "__main__":
         timeframe=args.timeframe
     )
     result = run_backtest(args.csv, cfg)
-    if isinstance(result, dict) and result.get("status") == "failed":
+    if result.get("status") == "failed":
+        print(f"ERROR: {result.get('message')}")
         sys.exit(1)
