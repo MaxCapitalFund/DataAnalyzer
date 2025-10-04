@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-# Backtester_vercel.py — Clean, minimal working version
+# Backtester_vercel.py — Stable working version
 # Author: GPT-5 (for Larry Poe & Harrison)
-# Optimized for Vercel / serverless (no chart output)
+# Description: Simplified ThinkorSwim Strategy Report analyzer for /MES
+# Safe for serverless environments (no chart dependencies)
 
 import os
 import io
@@ -13,10 +14,10 @@ from pathlib import Path
 from typing import Tuple, Optional
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # CRITICAL IMPORT
 
 # =========================
-# Configuration
+# CONFIGURATION
 # =========================
 
 @dataclass
@@ -27,8 +28,8 @@ class BacktestConfig:
     session_hours_rth: Tuple[str, str] = ("09:30", "16:00")
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
-    point_value: float = 5.0
-    version: str = "1.3.2"
+    point_value: float = 5.0  # $5 per point on /MES
+    version: str = "1.3.3"
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path("/tmp")
@@ -39,12 +40,12 @@ class BacktestConfig:
         return str(temp_dir / f"Backtests_{day}_{safe_strategy}_{self.timeframe}_{safe_instr}_{csv_stem}_{timestamp}")
 
 # =========================
-# Helpers
+# HELPERS
 # =========================
 
 def _to_float(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.replace(r"[\$,]", "", regex=True)
-    s = s.str.replace(r"\(([^()]*)\)", r"-\1", regex=True)
+    s = s.str.replace(r"\(([^()]*)\)", r"-\1", regex=True)  # (123) -> -123
     s = s.replace("", np.nan)
     return pd.to_numeric(s, errors="coerce")
 
@@ -58,15 +59,12 @@ def _tag_session(dt: pd.Timestamp) -> str:
     if pd.isna(dt):
         return "Unknown"
     t = dt.time()
-    if PRE_START <= t <= PRE_END:
-        return "PRE"
-    if RTH_START <= t <= RTH_END:
-        return "RTH"
+    if PRE_START <= t <= PRE_END: return "PRE"
+    if RTH_START <= t <= RTH_END: return "RTH"
     return "OFF"
 
 def _in_rth(dt: pd.Timestamp) -> bool:
-    if pd.isna(dt):
-        return False
+    if pd.isna(dt): return False
     t = dt.time()
     return RTH_START <= t <= RTH_END
 
@@ -83,15 +81,8 @@ def _profit_factor(pl: pd.Series) -> float:
         return float("inf") if gp > 0 else 0.0
     return float(gp / gl)
 
-def _exit_reason(text: str) -> str:
-    s = str(text).upper()
-    if any(w in s for w in ["TARGET", "TP", "PROFIT"]): return "Target"
-    if any(w in s for w in ["STOP", "SL", "STOPPED"]):  return "Stop"
-    if any(w in s for w in ["TIME", "TIME EXIT", "TIMED"]): return "Time"
-    return "Close"
-
 # =========================
-# Load & Clean (TOS Strategy Report)
+# LOAD & CLEAN CSV
 # =========================
 
 def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
@@ -108,18 +99,18 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
 
     df = pd.read_csv(io.StringIO("".join(lines[start_idx:])), sep=";")
 
-    # --- Date/Time
+    # Parse Date/Time
     if "Date/Time" in df.columns:
         df["Date"] = _parse_datetime(df["Date/Time"])
     elif "Date" in df.columns and "Time" in df.columns:
         dt_str = df["Date"].astype(str) + " " + df["Time"].astype(str)
         df["Date"] = pd.to_datetime(dt_str, errors="coerce")
 
-    # --- Strategy clean/tag
+    # Strategy clean/tag
     df["BaseStrategy"] = df["Strategy"].astype(str).str.split("(").str[0].str.strip()
     df["Tag"] = df["Strategy"].astype(str).str.extract(r"\(([^()]*)\)", expand=False).fillna("")
 
-    # --- Normalize side
+    # Normalize Side
     def normalize_side(v):
         if not isinstance(v, str): return ""
         v = v.upper()
@@ -131,7 +122,7 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
 
     df["SideNorm"] = df["Side"].map(normalize_side)
 
-    # --- Parse numerics
+    # Numeric conversions
     df["TradePL"] = _to_float(df.get("Trade P/L", 0.0))
     df["CumPL"] = _to_float(df.get("P/L", 0.0))
     df["Qty"] = pd.to_numeric(df.get("Quantity", np.nan), errors="coerce")
@@ -140,7 +131,7 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     return df
 
 # =========================
-# Trade pairing
+# BUILD TRADES
 # =========================
 
 def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
@@ -179,20 +170,19 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
     return pd.DataFrame(trades)
 
 # =========================
-# Stop-loss correction
+# STOP-LOSS CAP
 # =========================
 
 def apply_stoploss_cap(trades: pd.DataFrame, point_value: float) -> pd.DataFrame:
-    """Cap all trades at -$100 or -20 points."""
     df = trades.copy()
-    stop_cap = -100.0
+    stop_cap = -100.0  # $100 or 20 points
     df["SLBreached"] = df["NetPL"] < stop_cap
     df["AdjustedNetPL"] = np.where(df["SLBreached"], stop_cap, df["NetPL"])
     df["PointsPerContract"] = df["AdjustedNetPL"] / point_value
     return df
 
 # =========================
-# Compute metrics
+# METRICS
 # =========================
 
 def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
@@ -203,7 +193,7 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     equity = cfg.initial_capital + pl.cumsum()
 
     total_net = float(pl.sum())
-    total_return_pct = (total_net / cfg.initial_capital) * 100.0 if cfg.initial_capital else 0
+    total_return_pct = (total_net / cfg.initial_capital) * 100.0
     avg_win = float(pl[pl > 0].mean()) if any(pl > 0) else 0
     avg_loss = float(pl[pl < 0].mean()) if any(pl < 0) else 0
 
@@ -228,7 +218,7 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     return metrics
 
 # =========================
-# Analytics Markdown
+# MARKDOWN REPORT
 # =========================
 
 def save_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConfig, outdir: str):
@@ -270,7 +260,7 @@ def save_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConfig, 
         f.write(md)
 
 # =========================
-# Runner
+# RUNNER
 # =========================
 
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
@@ -291,9 +281,9 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     return metrics
 
 if __name__ == "__main__":
-    import argparse, glob, sys
+    import argparse, sys
 
-    parser = argparse.ArgumentParser(description="Minimal TOS Strategy Report Backtester for /MES")
+    parser = argparse.ArgumentParser(description="ThinkorSwim Strategy Report Backtester for /MES")
     parser.add_argument("--csv", required=True, help="Path to TOS Strategy Report CSV")
     parser.add_argument("--capital", type=float, default=2500.0, help="Initial capital")
     parser.add_argument("--commission", type=float, default=4.04, help="Commission per RT")
