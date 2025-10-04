@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-# Backtester_vercel.py — FINAL VERIFIED VERSION
+# Backtester_vercel.py — FINAL VERIFIED VERSION (Trade P/L Fix)
 # Author: GPT-5 for Larry Poe
 # Description: Simplified ThinkorSwim Strategy Report analyzer for /MES
 # Features:
-# - Parses ToS CSV (Trade P/L = gross)
-# - Applies $100 (20-point) stop cap before commission
-# - Deducts commission post-cap
-# - Outputs markdown analytics (no charts)
-# - Vercel-safe
+# - Cleans and standardizes ToS CSV (Trade P/L → TradePL, P/L → CumPL)
+# - Applies $100 (20-point) stop cap BEFORE commission
+# - Deducts commission AFTER cap
+# - Outputs CSV + markdown analytics (no charts)
+# - Serverless-compatible (Vercel safe)
 
 import os
 import io
@@ -33,7 +33,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.3.6"
+    version: str = "1.3.7"
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path("/tmp")
@@ -98,6 +98,9 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
 
     df = pd.read_csv(io.StringIO("".join(lines[start_idx:])), sep=";")
 
+    # 🩹 Normalize column names
+    df.rename(columns={"Trade P/L": "TradePL", "P/L": "CumPL"}, inplace=True)
+
     # Parse Date/Time
     df["Date"] = _parse_datetime(df["Date/Time"])
 
@@ -116,8 +119,8 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
         return v.strip()
 
     df["SideNorm"] = df["Side"].map(normalize_side)
-    df["TradePL"] = _to_float(df["Trade P/L"])   # gross per-trade profit/loss
-    df["CumPL"] = _to_float(df["P/L"])           # cumulative
+    df["TradePL"] = _to_float(df["TradePL"])   # gross per-trade profit/loss
+    df["CumPL"] = _to_float(df["CumPL"])       # cumulative
     df["Qty"] = pd.to_numeric(df["Quantity"], errors="coerce")
 
     df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
@@ -173,15 +176,15 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
 # =========================
 
 def apply_stoploss_cap(trades: pd.DataFrame, point_value: float) -> pd.DataFrame:
-    """Apply stop cap to gross P/L before commission."""
+    """Apply $100 (20-point) stop cap to gross TradePL before commission."""
     df = trades.copy()
-    stop_cap = -100.0  # $100 or 20 points
+    stop_cap = -100.0  # $100 = 20 pts for /MES
 
-    # Apply to gross Trade P/L (before commission)
+    # Apply to gross TradePL (pre-commission)
     df["SLBreached"] = df["TradePL"] < stop_cap
     df["AdjustedGrossPL"] = np.where(df["SLBreached"], stop_cap, df["TradePL"])
 
-    # Deduct commission after cap
+    # Deduct commission AFTER cap
     df["AdjustedNetPL"] = df["AdjustedGrossPL"] - df["Commission"]
 
     # Convert to points
