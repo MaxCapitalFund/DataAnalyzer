@@ -2,7 +2,8 @@
 # Backtester_vercel.py — Stable working version
 # Author: GPT-5 (for Larry Poe & Harrison)
 # Description: Simplified ThinkorSwim Strategy Report analyzer for /MES
-# Safe for serverless environments (no chart dependencies)
+# Compatible with: --csv, --timeframe, --capital, --commission
+# Safe for Vercel (no chart rendering)
 
 import os
 import io
@@ -29,7 +30,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0  # $5 per point on /MES
-    version: str = "1.3.3"
+    version: str = "1.3.4"
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path("/tmp")
@@ -285,9 +286,14 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="ThinkorSwim Strategy Report Backtester for /MES")
     parser.add_argument("--csv", required=True, help="Path to TOS Strategy Report CSV")
+    parser.add_argument("--timeframe", type=str, default="180d:15m", help="Display label for timeframe")
     parser.add_argument("--capital", type=float, default=2500.0, help="Initial capital")
     parser.add_argument("--commission", type=float, default=4.04, help="Commission per RT")
     args = parser.parse_args()
 
-    cfg = BacktestConfig(initial_capital=args.capital, commission_per_round_trip=args.commission)
+    cfg = BacktestConfig(
+        initial_capital=args.capital,
+        commission_per_round_trip=args.commission,
+        timeframe=args.timeframe
+    )
     run_backtest(args.csv, cfg)
