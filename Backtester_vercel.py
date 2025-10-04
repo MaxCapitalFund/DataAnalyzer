@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-# Backtester_vercel.py — Stable working version
-# Author: GPT-5 (for Larry Poe & Harrison)
+# Backtester_vercel.py — FINAL VERIFIED VERSION
+# Author: GPT-5 for Larry Poe
 # Description: Simplified ThinkorSwim Strategy Report analyzer for /MES
-# Compatible with: --csv, --timeframe, --capital, --commission
-# Safe for Vercel (no chart rendering)
+# Features:
+# - Parses ToS CSV (Trade P/L = gross)
+# - Applies $100 (20-point) stop cap before commission
+# - Deducts commission post-cap
+# - Outputs markdown analytics (no charts)
+# - Vercel-safe
 
 import os
 import io
@@ -15,7 +19,7 @@ from pathlib import Path
 from typing import Tuple, Optional
 
 import numpy as np
-import pandas as pd  # CRITICAL IMPORT
+import pandas as pd
 
 # =========================
 # CONFIGURATION
@@ -26,11 +30,10 @@ class BacktestConfig:
     strategy_name: str = ""
     instruments: Tuple[str, ...] = ("/MES",)
     timeframe: str = "180d:15m"
-    session_hours_rth: Tuple[str, str] = ("09:30", "16:00")
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
-    point_value: float = 5.0  # $5 per point on /MES
-    version: str = "1.3.4"
+    point_value: float = 5.0
+    version: str = "1.3.6"
 
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path("/tmp")
@@ -46,7 +49,7 @@ class BacktestConfig:
 
 def _to_float(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.replace(r"[\$,]", "", regex=True)
-    s = s.str.replace(r"\(([^()]*)\)", r"-\1", regex=True)  # (123) -> -123
+    s = s.str.replace(r"\(([^()]*)\)", r"-\1", regex=True)
     s = s.replace("", np.nan)
     return pd.to_numeric(s, errors="coerce")
 
@@ -64,11 +67,6 @@ def _tag_session(dt: pd.Timestamp) -> str:
     if RTH_START <= t <= RTH_END: return "RTH"
     return "OFF"
 
-def _in_rth(dt: pd.Timestamp) -> bool:
-    if pd.isna(dt): return False
-    t = dt.time()
-    return RTH_START <= t <= RTH_END
-
 def _max_drawdown(equity_curve: pd.Series) -> float:
     running_max = equity_curve.cummax()
     drawdown = equity_curve / running_max - 1.0
@@ -83,7 +81,7 @@ def _profit_factor(pl: pd.Series) -> float:
     return float(gp / gl)
 
 # =========================
-# LOAD & CLEAN CSV
+# LOAD & CLEAN
 # =========================
 
 def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
@@ -101,13 +99,9 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO("".join(lines[start_idx:])), sep=";")
 
     # Parse Date/Time
-    if "Date/Time" in df.columns:
-        df["Date"] = _parse_datetime(df["Date/Time"])
-    elif "Date" in df.columns and "Time" in df.columns:
-        dt_str = df["Date"].astype(str) + " " + df["Time"].astype(str)
-        df["Date"] = pd.to_datetime(dt_str, errors="coerce")
+    df["Date"] = _parse_datetime(df["Date/Time"])
 
-    # Strategy clean/tag
+    # Clean Strategy
     df["BaseStrategy"] = df["Strategy"].astype(str).str.split("(").str[0].str.strip()
     df["Tag"] = df["Strategy"].astype(str).str.extract(r"\(([^()]*)\)", expand=False).fillna("")
 
@@ -122,11 +116,9 @@ def load_tos_strategy_report(file_path: str) -> pd.DataFrame:
         return v.strip()
 
     df["SideNorm"] = df["Side"].map(normalize_side)
-
-    # Numeric conversions
-    df["TradePL"] = _to_float(df.get("Trade P/L", 0.0))
-    df["CumPL"] = _to_float(df.get("P/L", 0.0))
-    df["Qty"] = pd.to_numeric(df.get("Quantity", np.nan), errors="coerce")
+    df["TradePL"] = _to_float(df["Trade P/L"])   # gross per-trade profit/loss
+    df["CumPL"] = _to_float(df["P/L"])           # cumulative
+    df["Qty"] = pd.to_numeric(df["Quantity"], errors="coerce")
 
     df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
     return df
@@ -149,9 +141,9 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
         exit_ = exits[exits["Date"] >= entry["Date"]].iloc[0] if len(exits[exits["Date"] >= entry["Date"]]) else exits.iloc[-1]
 
         qty = abs(entry.get("Qty", 1) or 1)
-        trade_pl = float(exit_.get("TradePL", 0.0))
-        commission = commission_rt * qty
-        net_pl = trade_pl - commission
+        trade_pl = float(exit_.get("TradePL", 0.0))   # gross profit/loss
+        commission = commission_rt * qty              # per round trip
+        net_pl = trade_pl - commission                # post-commission
 
         trades.append({
             "Id": tid,
@@ -160,14 +152,20 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
             "EntrySide": entry["SideNorm"],
             "ExitSide": exit_["SideNorm"],
             "Direction": "Long" if entry["SideNorm"] == "BTO" else "Short",
-            "TradePL": trade_pl,
+            "TradePL": trade_pl,       # gross
             "Commission": commission,
-            "NetPL": net_pl,
+            "NetPL": net_pl,           # gross - commission
             "BaseStrategy": entry["BaseStrategy"],
             "Tag": entry["Tag"],
             "Session": _tag_session(entry["Date"])
         })
 
+    if not trades:
+        return pd.DataFrame(columns=[
+            "Id", "EntryTime", "ExitTime", "EntrySide", "ExitSide",
+            "Direction", "TradePL", "Commission", "NetPL",
+            "BaseStrategy", "Tag", "Session"
+        ])
     return pd.DataFrame(trades)
 
 # =========================
@@ -175,10 +173,18 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
 # =========================
 
 def apply_stoploss_cap(trades: pd.DataFrame, point_value: float) -> pd.DataFrame:
+    """Apply stop cap to gross P/L before commission."""
     df = trades.copy()
     stop_cap = -100.0  # $100 or 20 points
-    df["SLBreached"] = df["NetPL"] < stop_cap
-    df["AdjustedNetPL"] = np.where(df["SLBreached"], stop_cap, df["NetPL"])
+
+    # Apply to gross Trade P/L (before commission)
+    df["SLBreached"] = df["TradePL"] < stop_cap
+    df["AdjustedGrossPL"] = np.where(df["SLBreached"], stop_cap, df["TradePL"])
+
+    # Deduct commission after cap
+    df["AdjustedNetPL"] = df["AdjustedGrossPL"] - df["Commission"]
+
+    # Convert to points
     df["PointsPerContract"] = df["AdjustedNetPL"] / point_value
     return df
 
@@ -267,7 +273,7 @@ def save_analytics_md(trades: pd.DataFrame, metrics: dict, cfg: BacktestConfig, 
 def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     csv_stem = Path(tos_csv_path).stem.replace(" ", "_")
     df = load_tos_strategy_report(tos_csv_path)
-    cfg.strategy_name = df["BaseStrategy"].iloc[0]
+    cfg.strategy_name = df["BaseStrategy"].iloc[0] if "BaseStrategy" in df.columns else "Unknown"
 
     trades = build_trades(df, cfg.commission_per_round_trip)
     trades = apply_stoploss_cap(trades, cfg.point_value)
@@ -277,7 +283,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
     trades.to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
     save_analytics_md(trades, metrics, cfg, outdir)
 
-    print(f"✅ Backtest complete — {len(trades)} trades | Net P/L ${metrics['net_profit']:.2f}")
+    print(f"✅ Backtest complete — {len(trades)} trades | Net P/L ${metrics.get('net_profit', 0):.2f}")
     print(f"📁 Output directory: {outdir}")
     return metrics
 
