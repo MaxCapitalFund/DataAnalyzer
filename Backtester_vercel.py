@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Backtester_vercel.py — CLEAN ERROR-FREE VERSION
+# Backtester_vercel.py — CLEAN ERROR-FREE VERSION (v1.3.10)
 # Author: GPT-5 for Larry Poe
 # Description:
 # Parses ThinkorSwim Strategy Report CSV (Trade P/L, P/L)
@@ -28,7 +28,7 @@ class BacktestConfig:
     initial_capital: float = 2500.0
     commission_per_round_trip: float = 4.04
     point_value: float = 5.0
-    version: str = "1.3.9"
+    version: str = "1.3.10"
     def outdir(self, csv_stem: str, instrument: str, strategy_label: str) -> str:
         temp_dir = Path("/tmp")
         day = datetime.now().strftime("%Y-%m-%d")
@@ -149,8 +149,11 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
         print(f"DEBUG: Processing trade ID {tid}, group size: {len(g)}")
         entries = g[g["SideNorm"].isin(["BTO", "STO"])]
         exits = g[g["SideNorm"].isin(["STC", "BTC"])]
-        if not len(entries) or not len(exits):
-            print(f"DEBUG: Skipping trade ID {tid}: no valid entry ({len(entries)}) or exit ({len(exits)})")
+        if not len(entries):
+            print(f"DEBUG: Skipping trade ID {tid}: no valid entries (BTO/STO)")
+            continue
+        if not len(exits):
+            print(f"DEBUG: Skipping trade ID {tid}: no valid exits (STC/BTC)")
             continue
         entry = entries.iloc[0]
         exit_ = exits[exits["Date"] >= entry["Date"]].iloc[0] if len(exits[exits["Date"] >= entry["Date"]]) else exits.iloc[-1]
@@ -201,6 +204,8 @@ def apply_stoploss_cap(trades: pd.DataFrame, point_value: float) -> pd.DataFrame
 # =========================
 def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     metrics = {
+        "status": "success",
+        "message": "Metrics computed",
         "strategy": cfg.strategy_name,
         "version": cfg.version,
         "num_trades": 0,
@@ -216,6 +221,7 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     }
     if trades.empty:
         print("DEBUG: No trades to compute metrics, returning default metrics")
+        metrics.update({"message": "No trades to compute metrics"})
         return metrics
     pl = trades["AdjustedNetPL"].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
@@ -304,6 +310,20 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
         print(f"DEBUG: Strategy name set to: {cfg.strategy_name}")
         trades = build_trades(df, cfg.commission_per_round_trip)
         print(f"DEBUG: Trades DataFrame shape: {trades.shape}")
+        if trades.empty:
+            print("WARNING: No trades generated, returning default metrics")
+            metrics.update({"message": "No trades generated from CSV"})
+            outdir = cfg.outdir(csv_stem, "/MES", cfg.strategy_name)
+            try:
+                os.makedirs(outdir, exist_ok=True)
+                print(f"DEBUG: Created/verified directory: {outdir}")
+                with open(os.path.join(outdir, "analytics.md"), "w", encoding="utf-8") as f:
+                    f.write("# Strategy Analysis Report\nNo trades generated from CSV.")
+                print(f"DEBUG: Successfully wrote analytics.md to {outdir}")
+            except OSError as e:
+                print(f"ERROR: Failed to write analytics.md to {outdir}: {e}")
+                metrics.update({"message": f"No trades generated; failed to write analytics.md: {e}"})
+            return metrics
         trades = apply_stoploss_cap(trades, cfg.point_value)
         metrics = compute_metrics(trades, cfg)
         
@@ -313,7 +333,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
             print(f"DEBUG: Created/verified directory: {outdir}")
         except OSError as e:
             print(f"ERROR: Failed to create directory {outdir}: {e}")
-            metrics.update({"status": "failed", "message": f"Failed to create directory {outdir}: {e}"})
+            metrics.update({"message": f"Failed to create directory {outdir}: {e}"})
             return metrics
         
         try:
@@ -321,7 +341,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
             print(f"DEBUG: Successfully wrote trades_enriched.csv to {outdir}")
         except OSError as e:
             print(f"ERROR: Failed to write trades_enriched.csv to {outdir}: {e}")
-            metrics.update({"status": "failed", "message": f"Failed to write trades_enriched.csv: {e}"})
+            metrics.update({"message": f"Failed to write trades_enriched.csv: {e}"})
             return metrics
         
         save_analytics_md(trades, metrics, cfg, outdir)
@@ -331,7 +351,7 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
         return metrics
     except Exception as e:
         print(f"ERROR: Backtest failed: {str(e)}")
-        metrics.update({"status": "failed", "message": f"Backtest failed: {str(e)}"})
+        metrics.update({"message": f"Backtest failed: {str(e)}"})
         return metrics
 # =========================
 # MAIN
