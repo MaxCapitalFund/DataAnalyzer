@@ -311,17 +311,56 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
 
 # ==========================================
 def apply_stoploss_cap(trades: pd.DataFrame, point_value: float) -> pd.DataFrame:
-    """Applies $100 stop-loss cap and computes adjusted net P/L."""
+    """Applies $100 stop-loss cap and adds saved money to gross profit."""
     if trades.empty:
         print("DEBUG: Trades DataFrame is empty, skipping stop-loss cap")
         return trades
+    
     df = trades.copy()
     stop_cap = -100.0
     df["SLBreached"] = df["TradePL"] < stop_cap
-    df["AdjustedGrossPL"] = np.where(df["SLBreached"], stop_cap, df["TradePL"])
-    # Fixed: Use NetPL as base, then adjust only if stop-loss was breached
-    df["AdjustedNetPL"] = np.where(df["SLBreached"], stop_cap - df["Commission"], df["NetPL"])
+    
+    # Calculate money saved by stop-loss cap
+    money_saved = 0.0
+    if df["SLBreached"].any():
+        original_losses = df.loc[df["SLBreached"], "TradePL"].sum()
+        capped_losses = stop_cap * df["SLBreached"].sum()
+        money_saved = abs(original_losses - capped_losses)
+        print(f"DEBUG: Stop-loss cap saved ${money_saved:.2f}")
+    
+    # Apply stop-loss cap to net P/L (after commission) at exactly -$100
+    df["AdjustedNetPL"] = df["NetPL"].copy()
+    df["AdjustedGrossPL"] = df["TradePL"].copy()
+    
+    # Cap net P/L at exactly -$100
+    loss_mask = df["NetPL"] < -100.0
+    if loss_mask.any():
+        df.loc[loss_mask, "AdjustedNetPL"] = -100.0
+        # Adjust gross P/L to maintain the -$100 net P/L after commission
+        df.loc[loss_mask, "AdjustedGrossPL"] = -100.0 + df.loc[loss_mask, "Commission"]
+        
+        # Calculate money saved
+        original_net_losses = df.loc[loss_mask, "NetPL"].sum()
+        capped_net_losses = -100.0 * loss_mask.sum()
+        money_saved = abs(original_net_losses - capped_net_losses)
+        print(f"DEBUG: Stop-loss cap saved ${money_saved:.2f} in net P/L")
+        
+        # Add saved money to gross profit (distribute among winning trades)
+        if money_saved > 0:
+            winning_trades = df["NetPL"] > 0
+            if winning_trades.any():
+                # Distribute saved money proportionally among winning trades
+                df.loc[winning_trades, "AdjustedGrossPL"] += money_saved * (df.loc[winning_trades, "TradePL"] / df.loc[winning_trades, "TradePL"].sum())
+                df.loc[winning_trades, "AdjustedNetPL"] += money_saved * (df.loc[winning_trades, "TradePL"] / df.loc[winning_trades, "TradePL"].sum())
+                print(f"DEBUG: Added ${money_saved:.2f} to gross profit (distributed among {winning_trades.sum()} winning trades)")
+            else:
+                # If no winning trades, add to the least losing trade
+                min_loss_idx = df["NetPL"].idxmax()  # Least negative
+                df.loc[min_loss_idx, "AdjustedGrossPL"] += money_saved
+                df.loc[min_loss_idx, "AdjustedNetPL"] += money_saved
+                print(f"DEBUG: Added ${money_saved:.2f} to least losing trade (no winning trades)")
     df["PointsPerContract"] = df["AdjustedNetPL"] / point_value
+    
     print(f"DEBUG: Applied stop-loss cap, DataFrame shape: {df.shape}")
     return df
 
@@ -363,7 +402,7 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     if trades.empty:
         metrics["message"] = "No trades to compute metrics"
         return metrics
-    pl = trades["NetPL"].fillna(0.0)
+    pl = trades["AdjustedNetPL"].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
     total_net = float(pl.sum())
     total_return_pct = (total_net / cfg.initial_capital) * 100.0
@@ -373,12 +412,12 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     max_dd_dollars = float((equity.cummax() - equity).max())
     recovery_factor = total_net / max_dd_dollars if max_dd_dollars else 0.0
     session_wins = {
-        "RTH": (trades[trades["Session"] == "RTH"]["NetPL"] > 0).mean() * 100.0,
-        "PRE": (trades[trades["Session"] == "PRE"]["NetPL"] > 0).mean() * 100.0,
-        "AFTER": (trades[trades["Session"] == "AFTER"]["NetPL"] > 0).mean() * 100.0
+        "RTH": (trades[trades["Session"] == "RTH"]["AdjustedNetPL"] > 0).mean() * 100.0,
+        "PRE": (trades[trades["Session"] == "PRE"]["AdjustedNetPL"] > 0).mean() * 100.0,
+        "AFTER": (trades[trades["Session"] == "AFTER"]["AdjustedNetPL"] > 0).mean() * 100.0
     }
     trades["DayOfWeek"] = trades["EntryTime"].dt.day_name()
-    avg_pl_by_day = trades.groupby("DayOfWeek")["NetPL"].mean().to_dict()
+    avg_pl_by_day = trades.groupby("DayOfWeek")["AdjustedNetPL"].mean().to_dict()
     metrics.update({
         "num_trades": len(trades),
         "net_profit": total_net,
@@ -526,8 +565,8 @@ def generate_analysis_tables(trades: pd.DataFrame, output_dir: str) -> None:
     # Monthly Performance
     trades["Month"] = trades["EntryTime"].dt.to_period('M')
     monthly_perf = trades.groupby("Month").agg({
-        "NetPL": ["sum", "count", "mean"],
-        "TradePL": "sum"
+        "AdjustedNetPL": ["sum", "count", "mean"],
+        "AdjustedGrossPL": "sum"
     }).round(2)
     monthly_perf.columns = ["Net_PL", "Trade_Count", "Avg_PL", "Gross_PL"]
     monthly_perf = monthly_perf.reset_index()
@@ -537,8 +576,8 @@ def generate_analysis_tables(trades: pd.DataFrame, output_dir: str) -> None:
     # Day of Week KPIs
     trades["DayOfWeek"] = trades["EntryTime"].dt.day_name()
     dow_kpis = trades.groupby("DayOfWeek").agg({
-        "NetPL": ["sum", "count", "mean"],
-        "TradePL": "sum"
+        "AdjustedNetPL": ["sum", "count", "mean"],
+        "AdjustedGrossPL": "sum"
     }).round(2)
     dow_kpis.columns = ["Net_PL", "Trade_Count", "Avg_PL", "Gross_PL"]
     dow_kpis = dow_kpis.reset_index()
@@ -546,8 +585,8 @@ def generate_analysis_tables(trades: pd.DataFrame, output_dir: str) -> None:
     
     # Session KPIs
     session_kpis = trades.groupby("Session").agg({
-        "NetPL": ["sum", "count", "mean"],
-        "TradePL": "sum"
+        "AdjustedNetPL": ["sum", "count", "mean"],
+        "AdjustedGrossPL": "sum"
     }).round(2)
     session_kpis.columns = ["Net_PL", "Trade_Count", "Avg_PL", "Gross_PL"]
     session_kpis = session_kpis.reset_index()
@@ -556,19 +595,19 @@ def generate_analysis_tables(trades: pd.DataFrame, output_dir: str) -> None:
     # Hold Time KPIs (simplified - using entry to exit time)
     trades["HoldTime"] = (trades["ExitTime"] - trades["EntryTime"]).dt.total_seconds() / 3600  # hours
     hold_kpis = trades.groupby(pd.cut(trades["HoldTime"], bins=5, labels=["<1h", "1-3h", "3-6h", "6-12h", ">12h"])).agg({
-        "NetPL": ["sum", "count", "mean"],
-        "TradePL": "sum"
+        "AdjustedNetPL": ["sum", "count", "mean"],
+        "AdjustedGrossPL": "sum"
     }).round(2)
     hold_kpis.columns = ["Net_PL", "Trade_Count", "Avg_PL", "Gross_PL"]
     hold_kpis = hold_kpis.reset_index()
     hold_kpis.to_csv(f"{output_dir}/hold_kpis.csv", index=False)
     
     # Top Best Trades
-    top_best = trades.nlargest(10, "NetPL")[["Id", "EntryTime", "ExitTime", "Direction", "NetPL", "TradePL", "Commission", "Session", "DayOfWeek"]].round(2)
+    top_best = trades.nlargest(10, "AdjustedNetPL")[["Id", "EntryTime", "ExitTime", "Direction", "AdjustedNetPL", "AdjustedGrossPL", "Commission", "Session", "DayOfWeek"]].round(2)
     top_best.to_csv(f"{output_dir}/top_best_trades.csv", index=False)
     
     # Top Worst Trades
-    top_worst = trades.nsmallest(10, "NetPL")[["Id", "EntryTime", "ExitTime", "Direction", "NetPL", "TradePL", "Commission", "Session", "DayOfWeek"]].round(2)
+    top_worst = trades.nsmallest(10, "AdjustedNetPL")[["Id", "EntryTime", "ExitTime", "Direction", "AdjustedNetPL", "AdjustedGrossPL", "Commission", "Session", "DayOfWeek"]].round(2)
     top_worst.to_csv(f"{output_dir}/top_worst_trades.csv", index=False)
     
     # Max Win Streak (simplified)
@@ -579,7 +618,7 @@ def generate_analysis_tables(trades: pd.DataFrame, output_dir: str) -> None:
     streak_start = None
     
     for _, trade in trades_sorted.iterrows():
-        if trade["NetPL"] > 0:
+        if trade["AdjustedNetPL"] > 0:
             current_streak += 1
             if current_streak == 1:
                 streak_start = trade["EntryTime"]
@@ -590,7 +629,7 @@ def generate_analysis_tables(trades: pd.DataFrame, output_dir: str) -> None:
                     "StartDate": streak_start,
                     "EndDate": trades_sorted.iloc[trades_sorted.index.get_loc(trade.name) - 1]["ExitTime"],
                     "Length": current_streak,
-                    "TotalPL": trades_sorted.iloc[trades_sorted.index.get_loc(trade.name) - current_streak:trades_sorted.index.get_loc(trade.name)]["NetPL"].sum()
+                    "TotalPL": trades_sorted.iloc[trades_sorted.index.get_loc(trade.name) - current_streak:trades_sorted.index.get_loc(trade.name)]["AdjustedNetPL"].sum()
                 })
             current_streak = 0
     
@@ -607,7 +646,7 @@ def generate_analysis_tables(trades: pd.DataFrame, output_dir: str) -> None:
     streak_start = None
     
     for _, trade in trades_sorted.iterrows():
-        if trade["NetPL"] < 0:
+        if trade["AdjustedNetPL"] < 0:
             current_streak += 1
             if current_streak == 1:
                 streak_start = trade["EntryTime"]
@@ -618,7 +657,7 @@ def generate_analysis_tables(trades: pd.DataFrame, output_dir: str) -> None:
                     "StartDate": streak_start,
                     "EndDate": trades_sorted.iloc[trades_sorted.index.get_loc(trade.name) - 1]["ExitTime"],
                     "Length": current_streak,
-                    "TotalPL": trades_sorted.iloc[trades_sorted.index.get_loc(trade.name) - current_streak:trades_sorted.index.get_loc(trade.name)]["NetPL"].sum()
+                    "TotalPL": trades_sorted.iloc[trades_sorted.index.get_loc(trade.name) - current_streak:trades_sorted.index.get_loc(trade.name)]["AdjustedNetPL"].sum()
                 })
             current_streak = 0
     
@@ -655,20 +694,20 @@ def generate_detailed_metrics(trades: pd.DataFrame, output_dir: str) -> dict:
     
     # Basic metrics
     metrics['num_trades'] = len(trades)
-    metrics['net_profit'] = float(trades['NetPL'].sum())
-    metrics['gross_profit'] = float(trades[trades['NetPL'] > 0]['NetPL'].sum())
-    metrics['gross_loss'] = float(trades[trades['NetPL'] < 0]['NetPL'].sum())
-    metrics['total_return_pct'] = float((trades['NetPL'].sum() / 2500.0) * 100.0)
+    metrics['net_profit'] = float(trades['AdjustedNetPL'].sum())
+    metrics['gross_profit'] = float(trades[trades['AdjustedNetPL'] > 0]['AdjustedNetPL'].sum())
+    metrics['gross_loss'] = float(trades[trades['AdjustedNetPL'] < 0]['AdjustedNetPL'].sum())
+    metrics['total_return_pct'] = float((trades['AdjustedNetPL'].sum() / 2500.0) * 100.0)
     
     # Win/Loss metrics
-    winning_trades = trades[trades['NetPL'] > 0]
-    losing_trades = trades[trades['NetPL'] < 0]
+    winning_trades = trades[trades['AdjustedNetPL'] > 0]
+    losing_trades = trades[trades['AdjustedNetPL'] < 0]
     
     metrics['win_rate_pct'] = float((len(winning_trades) / len(trades)) * 100.0) if len(trades) > 0 else 0.0
-    metrics['avg_win_dollars'] = float(winning_trades['NetPL'].mean()) if len(winning_trades) > 0 else 0.0
-    metrics['avg_loss_dollars'] = float(losing_trades['NetPL'].mean()) if len(losing_trades) > 0 else 0.0
-    metrics['largest_winning_trade'] = float(trades['NetPL'].max())
-    metrics['largest_losing_trade'] = float(trades['NetPL'].min())
+    metrics['avg_win_dollars'] = float(winning_trades['AdjustedNetPL'].mean()) if len(winning_trades) > 0 else 0.0
+    metrics['avg_loss_dollars'] = float(losing_trades['AdjustedNetPL'].mean()) if len(losing_trades) > 0 else 0.0
+    metrics['largest_winning_trade'] = float(trades['AdjustedNetPL'].max())
+    metrics['largest_losing_trade'] = float(trades['AdjustedNetPL'].min())
     
     # Profit factor
     if abs(metrics['gross_loss']) > 0:
@@ -677,10 +716,10 @@ def generate_detailed_metrics(trades: pd.DataFrame, output_dir: str) -> dict:
         metrics['profit_factor'] = float('inf') if metrics['gross_profit'] > 0 else 0.0
     
     # Expectancy
-    metrics['expectancy_per_trade_dollars'] = float(trades['NetPL'].mean())
+    metrics['expectancy_per_trade_dollars'] = float(trades['AdjustedNetPL'].mean())
     
     # Drawdown calculation
-    equity_curve = 2500.0 + trades['NetPL'].cumsum()
+    equity_curve = 2500.0 + trades['AdjustedNetPL'].cumsum()
     running_max = equity_curve.expanding().max()
     drawdown = equity_curve - running_max
     metrics['max_drawdown_dollars'] = float(abs(drawdown.min()))
@@ -694,7 +733,7 @@ def generate_detailed_metrics(trades: pd.DataFrame, output_dir: str) -> dict:
     
     # Sharpe ratio (simplified)
     if len(trades) > 1:
-        returns = trades['NetPL'] / 2500.0
+        returns = trades['AdjustedNetPL'] / 2500.0
         metrics['sharpe_annualized'] = float((returns.mean() / returns.std()) * (252 ** 0.5)) if returns.std() > 0 else 0.0
     else:
         metrics['sharpe_annualized'] = 0.0
@@ -759,7 +798,7 @@ def generate_performance_charts(trades: pd.DataFrame, output_dir: str) -> dict:
     
     try:
         # Equity Curve
-        equity_curve = 2500.0 + trades['NetPL'].cumsum()
+        equity_curve = 2500.0 + trades['AdjustedNetPL'].cumsum()
         plt.figure(figsize=(12, 6))
         plt.plot(trades['EntryTime'], equity_curve, linewidth=2, color='#2E86AB')
         plt.title('Equity Curve', fontsize=16, fontweight='bold')
@@ -797,7 +836,7 @@ def generate_performance_charts(trades: pd.DataFrame, output_dir: str) -> dict:
         
         # P&L Histogram
         plt.figure(figsize=(10, 6))
-        plt.hist(trades['NetPL'], bins=20, alpha=0.7, color='#2E86AB', edgecolor='black')
+        plt.hist(trades['AdjustedNetPL'], bins=20, alpha=0.7, color='#2E86AB', edgecolor='black')
         plt.axvline(x=0, color='red', linestyle='--', linewidth=2)
         plt.title('P&L Distribution', fontsize=16, fontweight='bold')
         plt.xlabel('Net P&L ($)')
@@ -815,7 +854,7 @@ def generate_performance_charts(trades: pd.DataFrame, output_dir: str) -> dict:
         trades['DayOfWeek'] = trades['EntryTime'].dt.day_name()
         trades['Hour'] = trades['EntryTime'].dt.hour
         
-        pivot_data = trades.pivot_table(values='NetPL', index='DayOfWeek', columns='Hour', aggfunc='sum', fill_value=0)
+        pivot_data = trades.pivot_table(values='AdjustedNetPL', index='DayOfWeek', columns='Hour', aggfunc='sum', fill_value=0)
         
         plt.figure(figsize=(12, 8))
         plt.imshow(pivot_data.values, cmap='RdYlGn', aspect='auto')
