@@ -6,6 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
+    <meta name="version" content="2025-10-20-02">
     <title>Trading Strategy Analyzer</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
@@ -695,21 +696,41 @@
                 formData.append('commission', '4.04');
 
                 // Debug: Log the URL being called
-                const apiUrl = '/api/analyze';
+                const apiUrl = 'http://localhost:8001/api/analyze';
                 console.log('🔍 Calling API URL:', apiUrl);
                 console.log('🔍 Current location:', window.location.href);
+                console.log('🔍 Frontend version: 2025-10-20-02');
                 
                 const response = await fetch(apiUrl, {
                     method: 'POST',
                     body: formData
                 });
 
+                console.log('🔍 Response status:', response.status);
+                console.log('🔍 Response headers:', response.headers);
+                console.log('🔍 Response content-type:', response.headers.get('content-type'));
+
                 if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(errorData.error || 'Analysis failed');
+                    const responseText = await response.text();
+                    console.log('🔍 Error response text:', responseText);
+                    try {
+                        const errorData = JSON.parse(responseText);
+                        throw new Error(errorData.error || 'Analysis failed');
+                    } catch (e) {
+                        throw new Error(`Server error: ${response.status} - ${responseText.substring(0, 100)}`);
+                    }
                 }
 
-                currentResults = await response.json();
+                const responseText = await response.text();
+                console.log('🔍 Response text (first 200 chars):', responseText.substring(0, 200));
+                
+                try {
+                    currentResults = JSON.parse(responseText);
+                } catch (e) {
+                    console.error('🔍 JSON parse error:', e);
+                    console.log('🔍 Full response text:', responseText);
+                    throw new Error(`Invalid JSON response: ${e.message}`);
+                }
                 displayResults(currentResults);
                 results.style.display = 'block';
 
@@ -802,7 +823,7 @@
                     </div>
                     <div class="metric-card">
                         <div class="metric-label">Max Drawdown</div>
-                        <div class="metric-value">${data.metrics.max_drawdown_pct?.toFixed(2) || 'N/A'}%</div>
+                        <div class="metric-value">${data.detailed_metrics?.basic_metrics?.max_drawdown_pct?.toFixed(2) || 'N/A'}%</div>
                     </div>
                     <div class="metric-card">
                         <div class="metric-label">Total Trades</div>
@@ -815,39 +836,39 @@
                     <div class="metrics-grid">
                         <div class="metric-card">
                             <div class="metric-label">Gross Profit</div>
-                            <div class="metric-value">$${data.metrics.gross_profit?.toFixed(2) || 'N/A'}</div>
+                            <div class="metric-value">$${data.detailed_metrics?.basic_metrics?.gross_profit?.toFixed(2) || 'N/A'}</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-label">Gross Loss</div>
-                            <div class="metric-value">$${data.metrics.gross_loss?.toFixed(2) || 'N/A'}</div>
+                            <div class="metric-value">$${data.detailed_metrics?.basic_metrics?.gross_loss?.toFixed(2) || 'N/A'}</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-label">Avg Win</div>
-                            <div class="metric-value">$${data.metrics.avg_win_dollars?.toFixed(2) || 'N/A'}</div>
+                            <div class="metric-value">$${data.detailed_metrics?.basic_metrics?.avg_win_dollars?.toFixed(2) || 'N/A'}</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-label">Avg Loss</div>
-                            <div class="metric-value">$${data.metrics.avg_loss_dollars?.toFixed(2) || 'N/A'}</div>
+                            <div class="metric-value">$${data.detailed_metrics?.basic_metrics?.avg_loss_dollars?.toFixed(2) || 'N/A'}</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-label">Largest Win</div>
-                            <div class="metric-value">$${data.metrics.largest_winning_trade?.toFixed(2) || 'N/A'}</div>
+                            <div class="metric-value">$${data.detailed_metrics?.basic_metrics?.largest_winning_trade?.toFixed(2) || 'N/A'}</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-label">Largest Loss</div>
-                            <div class="metric-value">$${data.metrics.largest_losing_trade?.toFixed(2) || 'N/A'}</div>
+                            <div class="metric-value">$${data.detailed_metrics?.basic_metrics?.largest_losing_trade?.toFixed(2) || 'N/A'}</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-label">Expectancy</div>
-                            <div class="metric-value">$${data.metrics.expectancy_per_trade_dollars?.toFixed(2) || 'N/A'}</div>
+                            <div class="metric-value">$${data.detailed_metrics?.basic_metrics?.expectancy_per_trade_dollars?.toFixed(2) || 'N/A'}</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-label">Recovery Factor</div>
-                            <div class="metric-value">${data.metrics.recovery_factor?.toFixed(2) || 'N/A'}</div>
+                            <div class="metric-value">${data.detailed_metrics?.basic_metrics?.recovery_factor?.toFixed(2) || 'N/A'}</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-label">Sharpe Ratio</div>
-                            <div class="metric-value">${data.metrics.sharpe_annualized?.toFixed(2) || 'N/A'}</div>
+                            <div class="metric-value">${data.detailed_metrics?.basic_metrics?.sharpe_annualized?.toFixed(2) || 'N/A'}</div>
                         </div>
                     </div>
                 </div>
@@ -862,7 +883,7 @@
                     html += `
                         <div class="chart-container">
                             <div class="chart-title">Equity Curve</div>
-                            <img src="${data.charts.equity_curve}" alt="Equity Curve" />
+                            <img src="data:image/png;base64,${data.charts.equity_curve}" alt="Equity Curve" />
                         </div>
                     `;
                 }
@@ -871,7 +892,7 @@
                     html += `
                         <div class="chart-container">
                             <div class="chart-title">Drawdown Curve</div>
-                            <img src="${data.charts.drawdown_curve}" alt="Drawdown Curve" />
+                            <img src="data:image/png;base64,${data.charts.drawdown_curve}" alt="Drawdown Curve" />
                         </div>
                     `;
                 }
@@ -880,7 +901,7 @@
                     html += `
                         <div class="chart-container">
                             <div class="chart-title">P&L Histogram</div>
-                            <img src="${data.charts.pl_histogram}" alt="P&L Histogram" />
+                            <img src="data:image/png;base64,${data.charts.pl_histogram}" alt="P&L Histogram" />
                         </div>
                     `;
                 }
@@ -889,7 +910,7 @@
                     html += `
                         <div class="chart-container">
                             <div class="chart-title">Day/Hour Heatmap</div>
-                            <img src="${data.charts.heatmap}" alt="Heatmap" />
+                            <img src="data:image/png;base64,${data.charts.heatmap}" alt="Heatmap" />
                         </div>
                     `;
                 }
@@ -1123,17 +1144,17 @@
                 `Total Return: ${currentResults.metrics.total_return_pct?.toFixed(2) || 'N/A'}%`,
                 `Win Rate: ${currentResults.metrics.win_rate_pct?.toFixed(2) || 'N/A'}%`,
                 `Profit Factor: ${currentResults.metrics.profit_factor?.toFixed(2) || 'N/A'}`,
-                `Max Drawdown: ${currentResults.metrics.max_drawdown_pct?.toFixed(2) || 'N/A'}%`,
+                `Max Drawdown: ${currentResults.detailed_metrics?.basic_metrics?.max_drawdown_pct?.toFixed(2) || 'N/A'}%`,
                 `Total Trades: ${currentResults.trades_rth_count || 0}`,
-                `Gross Profit: $${currentResults.metrics.gross_profit?.toFixed(2) || 'N/A'}`,
-                `Gross Loss: $${currentResults.metrics.gross_loss?.toFixed(2) || 'N/A'}`,
-                `Avg Win: $${currentResults.metrics.avg_win_dollars?.toFixed(2) || 'N/A'}`,
-                `Avg Loss: $${currentResults.metrics.avg_loss_dollars?.toFixed(2) || 'N/A'}`,
-                `Largest Win: $${currentResults.metrics.largest_winning_trade?.toFixed(2) || 'N/A'}`,
-                `Largest Loss: $${currentResults.metrics.largest_losing_trade?.toFixed(2) || 'N/A'}`,
-                `Expectancy: $${currentResults.metrics.expectancy_per_trade_dollars?.toFixed(2) || 'N/A'}`,
-                `Recovery Factor: ${currentResults.metrics.recovery_factor?.toFixed(2) || 'N/A'}`,
-                `Sharpe Ratio: ${currentResults.metrics.sharpe_annualized?.toFixed(2) || 'N/A'}`
+                `Gross Profit: $${currentResults.detailed_metrics?.basic_metrics?.gross_profit?.toFixed(2) || 'N/A'}`,
+                `Gross Loss: $${currentResults.detailed_metrics?.basic_metrics?.gross_loss?.toFixed(2) || 'N/A'}`,
+                `Avg Win: $${currentResults.detailed_metrics?.basic_metrics?.avg_win_dollars?.toFixed(2) || 'N/A'}`,
+                `Avg Loss: $${currentResults.detailed_metrics?.basic_metrics?.avg_loss_dollars?.toFixed(2) || 'N/A'}`,
+                `Largest Win: $${currentResults.detailed_metrics?.basic_metrics?.largest_winning_trade?.toFixed(2) || 'N/A'}`,
+                `Largest Loss: $${currentResults.detailed_metrics?.basic_metrics?.largest_losing_trade?.toFixed(2) || 'N/A'}`,
+                `Expectancy: $${currentResults.detailed_metrics?.basic_metrics?.expectancy_per_trade_dollars?.toFixed(2) || 'N/A'}`,
+                `Recovery Factor: ${currentResults.detailed_metrics?.basic_metrics?.recovery_factor?.toFixed(2) || 'N/A'}`,
+                `Sharpe Ratio: ${currentResults.detailed_metrics?.basic_metrics?.sharpe_annualized?.toFixed(2) || 'N/A'}`
             ];
             
             keyMetrics.forEach(metric => {
@@ -1150,19 +1171,19 @@
                 
                 // Add each chart
                 if (currentResults.charts.equity_curve) {
-                    addChart('Equity Curve', currentResults.charts.equity_curve);
+                    addChart('Equity Curve', 'data:image/png;base64,' + currentResults.charts.equity_curve);
                 }
                 
                 if (currentResults.charts.drawdown_curve) {
-                    addChart('Drawdown Curve', currentResults.charts.drawdown_curve);
+                    addChart('Drawdown Curve', 'data:image/png;base64,' + currentResults.charts.drawdown_curve);
                 }
                 
                 if (currentResults.charts.pl_histogram) {
-                    addChart('P&L Histogram', currentResults.charts.pl_histogram);
+                    addChart('P&L Histogram', 'data:image/png;base64,' + currentResults.charts.pl_histogram);
                 }
                 
                 if (currentResults.charts.heatmap) {
-                    addChart('Performance Heatmap', currentResults.charts.heatmap);
+                    addChart('Performance Heatmap', 'data:image/png;base64,' + currentResults.charts.heatmap);
                 }
             }
             

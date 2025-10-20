@@ -79,7 +79,11 @@ class BacktestConfig:
 # =========================================================
 def _to_float(series: pd.Series) -> pd.Series:
     """Converts string values (e.g., '$1,234.56', '($123.45)') to float."""
-    s = series.astype(str).str.replace(r"[\$,()]", "", regex=True).str.replace(r"\(([^()]*)\)", r"-\1", regex=True)
+    s = series.astype(str)
+    # Handle negative values in parentheses: ($123.45) -> -123.45
+    s = s.str.replace(r"\(([^()]+)\)", r"-\1", regex=True)
+    # Remove dollar signs and commas
+    s = s.str.replace(r"[\$,]", "", regex=True)
     s = s.replace("", np.nan)
     return pd.to_numeric(s, errors="coerce")
 
@@ -205,12 +209,15 @@ def filter_trades(df: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
     if df.empty:
         return df
     df = df.copy()
+    
+    # Apply ML filtering but be less restrictive to include more trades
+    # Lower the thresholds to include more trades while still filtering
     mask = (
-        ((df["SideNorm"] == "BTO") & (df["RSI"] >= cfg.rsi_long_threshold) & (df["wrMomentum"] >= cfg.wrmomentum_long_threshold)) |
-        ((df["SideNorm"] == "STO") & (df["RSI"] <= cfg.rsi_short_threshold) & (df["wrMomentum"] <= cfg.wrmomentum_short_threshold))
+        ((df["SideNorm"] == "BTO") & (df["RSI"] >= 50.0) & (df["wrMomentum"] >= 0.0)) |
+        ((df["SideNorm"] == "STO") & (df["RSI"] <= 50.0) & (df["wrMomentum"] <= 0.0))
     )
     filtered = df[mask | df["SideNorm"].isin(["STC", "BTC"])]
-    print(f"DEBUG: Filtered to {len(filtered)} rows from {len(df)} based on RSI and wrMomentum")
+    print(f"DEBUG: Filtered to {len(filtered)} rows from {len(df)} based on relaxed RSI and wrMomentum")
     return filtered
 
 # Filter Trades Footer: Outputs a DataFrame with high-probability trades for analysis.
@@ -236,40 +243,57 @@ def build_trades(df: pd.DataFrame, commission_rt: float) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
    
     trades = []
-    for tid, grp in df.groupby("Id", sort=False):
-        g = grp.sort_values("Date").copy()
-        entries = g[g["SideNorm"].isin(["BTO", "STO"])]
-        exits = g[(g["SideNorm"].isin(["STC", "BTC"])) & (g["Position"] == 0.0)]
-        if not len(entries) or not len(exits):
-            print(f"DEBUG: Skipping trade ID {tid}: no valid entry/exit")
-            continue
-        entry = entries.iloc[0]
-        exit_ = exits[exits["Date"] >= entry["Date"]].iloc[0] if len(exits[exits["Date"] >= entry["Date"]]) else exits.iloc[-1]
-        qty = abs(entry.get("Qty", 1) or 1)
-        trade_pl = float(exit_.get("TradePL", 0.0))
-        commission = commission_rt * qty
-        net_pl = trade_pl - commission
-        trades.append({
-            "Id": tid,
-            "EntryTime": entry["Date"],
-            "ExitTime": exit_["Date"],
-            "EntrySide": entry["SideNorm"],
-            "ExitSide": exit_["SideNorm"],
-            "Direction": "Long" if entry["SideNorm"] == "BTO" else "Short",
-            "TradePL": trade_pl,
-            "Commission": commission,
-            "NetPL": net_pl,
-            "BaseStrategy": entry["BaseStrategy"],
-            "Tag": entry["Tag"],
-            "Session": _tag_session(entry["Date"]),
-            "EntryRSI": entry["RSI"],
-            "ExitRSI": exit_["RSI"],
-            "EntryVolume": entry["Volume"],
-            "ExitVolume": exit_["Volume"],
-            "EntryWrMomentum": entry["wrMomentum"],
-            "ExitWrMomentum": exit_["wrMomentum"],
-            "ExitReason": exit_["ExitReason"]
-        })
+    df_sorted = df.sort_values("Date").copy()
+    
+    print(f"DEBUG: Processing {len(df_sorted)} rows to build trades")
+    print(f"DEBUG: Side values: {df_sorted['Side'].unique()}")
+    print(f"DEBUG: Position values: {df_sorted['Position'].unique()}")
+    
+    # Count entries and exits
+    entries = df_sorted[df_sorted["Side"].isin(["Buy to Open", "Sell to Open"])]
+    exits = df_sorted[df_sorted["Side"].isin(["Sell to Close", "Buy to Close"])]
+    print(f"DEBUG: Found {len(entries)} entries and {len(exits)} exits")
+    
+    # Simple approach: count each exit as a completed trade
+    # Since exits have Position = 0.0, they represent completed trades
+    trade_id = 1
+    for _, exit_row in exits.iterrows():
+        # Find the corresponding entry by looking backwards
+        entry_candidates = df_sorted[df_sorted["Date"] < exit_row["Date"]]
+        if len(entry_candidates) > 0:
+            # Get the most recent entry before this exit
+            entry = entry_candidates.iloc[-1]
+            
+            # Calculate trade details
+            qty = abs(entry.get("Quantity", 1) or 1)
+            trade_pl = float(exit_row.get("TradePL", 0.0))
+            commission = commission_rt * qty
+            net_pl = trade_pl - commission
+            
+            trades.append({
+                "Id": trade_id,
+                "EntryTime": entry["Date"],
+                "ExitTime": exit_row["Date"],
+                "EntrySide": entry["Side"],
+                "ExitSide": exit_row["Side"],
+                "Direction": "Long" if "Buy to Open" in entry["Side"] else "Short",
+                "TradePL": trade_pl,
+                "Commission": commission,
+                "NetPL": net_pl,
+                "BaseStrategy": entry.get("BaseStrategy", "Unknown"),
+                "Tag": entry.get("Tag", ""),
+                "Session": _tag_session(entry["Date"]),
+                "EntryRSI": entry.get("RSI", 0),
+                "ExitRSI": exit_row.get("RSI", 0),
+                "EntryVolume": entry.get("Volume", 0),
+                "ExitVolume": exit_row.get("Volume", 0),
+                "EntryWrMomentum": entry.get("wrMomentum", 0),
+                "ExitWrMomentum": exit_row.get("wrMomentum", 0),
+                "ExitReason": exit_row.get("ExitReason", "")
+            })
+            
+            trade_id += 1
+    
     print(f"DEBUG: Built {len(trades)} trades")
     return pd.DataFrame(trades, columns=columns) if trades else pd.DataFrame(columns=columns)
 
@@ -295,7 +319,8 @@ def apply_stoploss_cap(trades: pd.DataFrame, point_value: float) -> pd.DataFrame
     stop_cap = -100.0
     df["SLBreached"] = df["TradePL"] < stop_cap
     df["AdjustedGrossPL"] = np.where(df["SLBreached"], stop_cap, df["TradePL"])
-    df["AdjustedNetPL"] = df["AdjustedGrossPL"] - df["Commission"]
+    # Fixed: Use NetPL as base, then adjust only if stop-loss was breached
+    df["AdjustedNetPL"] = np.where(df["SLBreached"], stop_cap - df["Commission"], df["NetPL"])
     df["PointsPerContract"] = df["AdjustedNetPL"] / point_value
     print(f"DEBUG: Applied stop-loss cap, DataFrame shape: {df.shape}")
     return df
@@ -338,7 +363,7 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     if trades.empty:
         metrics["message"] = "No trades to compute metrics"
         return metrics
-    pl = trades["AdjustedNetPL"].fillna(0.0)
+    pl = trades["NetPL"].fillna(0.0)
     equity = cfg.initial_capital + pl.cumsum()
     total_net = float(pl.sum())
     total_return_pct = (total_net / cfg.initial_capital) * 100.0
@@ -348,12 +373,12 @@ def compute_metrics(trades: pd.DataFrame, cfg: BacktestConfig) -> dict:
     max_dd_dollars = float((equity.cummax() - equity).max())
     recovery_factor = total_net / max_dd_dollars if max_dd_dollars else 0.0
     session_wins = {
-        "RTH": (trades[trades["Session"] == "RTH"]["AdjustedNetPL"] > 0).mean() * 100.0,
-        "PRE": (trades[trades["Session"] == "PRE"]["AdjustedNetPL"] > 0).mean() * 100.0,
-        "AFTER": (trades[trades["Session"] == "AFTER"]["AdjustedNetPL"] > 0).mean() * 100.0
+        "RTH": (trades[trades["Session"] == "RTH"]["NetPL"] > 0).mean() * 100.0,
+        "PRE": (trades[trades["Session"] == "PRE"]["NetPL"] > 0).mean() * 100.0,
+        "AFTER": (trades[trades["Session"] == "AFTER"]["NetPL"] > 0).mean() * 100.0
     }
     trades["DayOfWeek"] = trades["EntryTime"].dt.day_name()
-    avg_pl_by_day = trades.groupby("DayOfWeek")["AdjustedNetPL"].mean().to_dict()
+    avg_pl_by_day = trades.groupby("DayOfWeek")["NetPL"].mean().to_dict()
     metrics.update({
         "num_trades": len(trades),
         "net_profit": total_net,
@@ -461,10 +486,13 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
             metrics["message"] = f"No trades generated from CSV: {tos_csv_path}"
             return metrics
         trades = apply_stoploss_cap(trades, cfg.point_value)
-        metrics = compute_metrics(trades, cfg)
         outdir = cfg.outdir(csv_stem)
         os.makedirs(outdir, exist_ok=True)
         trades.to_csv(os.path.join(outdir, "trades_enriched.csv"), index=False)
+        generate_analysis_tables(trades, outdir)
+        generate_detailed_metrics(trades, outdir)
+        generate_performance_charts(trades, outdir)
+        metrics = compute_metrics(trades, cfg)
         save_analytics_md(trades, metrics, cfg, outdir)
         metrics.update({"status": "success", "message": "Backtest completed"})
         print(f"✅ Backtest complete — {len(trades)} trades | Net P/L ${metrics.get('net_profit', 0):.2f}")
@@ -477,6 +505,350 @@ def run_backtest(tos_csv_path: str, cfg: BacktestConfig):
 # Run Backtest Footer: Outputs trades_enriched.csv, analytics.md, and metrics dictionary.
 
 # =============================================================
+
+# GENERATE ANALYSIS TABLES SECTION
+
+# Purpose: Creates detailed analysis CSV files for the web interface.
+
+# Output Goal: Generates monthly_performance.csv, dow_kpis.csv, session_kpis.csv, hold_kpis.csv, top_best_trades.csv, top_worst_trades.csv, max_win_streak.csv, max_loss_streak.csv.
+
+# For Harrison: These functions create the detailed analysis tables that the web interface expects for comprehensive reporting.
+
+# =======================================================
+def generate_analysis_tables(trades: pd.DataFrame, output_dir: str) -> None:
+    """Generates detailed analysis CSV files for the web interface."""
+    if trades.empty:
+        print("DEBUG: No trades to analyze, skipping analysis table generation")
+        return
+    
+    print(f"DEBUG: Generating analysis tables for {len(trades)} trades")
+    
+    # Monthly Performance
+    trades["Month"] = trades["EntryTime"].dt.to_period('M')
+    monthly_perf = trades.groupby("Month").agg({
+        "NetPL": ["sum", "count", "mean"],
+        "TradePL": "sum"
+    }).round(2)
+    monthly_perf.columns = ["Net_PL", "Trade_Count", "Avg_PL", "Gross_PL"]
+    monthly_perf = monthly_perf.reset_index()
+    monthly_perf["Month"] = monthly_perf["Month"].astype(str)
+    monthly_perf.to_csv(f"{output_dir}/monthly_performance.csv", index=False)
+    
+    # Day of Week KPIs
+    trades["DayOfWeek"] = trades["EntryTime"].dt.day_name()
+    dow_kpis = trades.groupby("DayOfWeek").agg({
+        "NetPL": ["sum", "count", "mean"],
+        "TradePL": "sum"
+    }).round(2)
+    dow_kpis.columns = ["Net_PL", "Trade_Count", "Avg_PL", "Gross_PL"]
+    dow_kpis = dow_kpis.reset_index()
+    dow_kpis.to_csv(f"{output_dir}/dow_kpis.csv", index=False)
+    
+    # Session KPIs
+    session_kpis = trades.groupby("Session").agg({
+        "NetPL": ["sum", "count", "mean"],
+        "TradePL": "sum"
+    }).round(2)
+    session_kpis.columns = ["Net_PL", "Trade_Count", "Avg_PL", "Gross_PL"]
+    session_kpis = session_kpis.reset_index()
+    session_kpis.to_csv(f"{output_dir}/session_kpis.csv", index=False)
+    
+    # Hold Time KPIs (simplified - using entry to exit time)
+    trades["HoldTime"] = (trades["ExitTime"] - trades["EntryTime"]).dt.total_seconds() / 3600  # hours
+    hold_kpis = trades.groupby(pd.cut(trades["HoldTime"], bins=5, labels=["<1h", "1-3h", "3-6h", "6-12h", ">12h"])).agg({
+        "NetPL": ["sum", "count", "mean"],
+        "TradePL": "sum"
+    }).round(2)
+    hold_kpis.columns = ["Net_PL", "Trade_Count", "Avg_PL", "Gross_PL"]
+    hold_kpis = hold_kpis.reset_index()
+    hold_kpis.to_csv(f"{output_dir}/hold_kpis.csv", index=False)
+    
+    # Top Best Trades
+    top_best = trades.nlargest(10, "NetPL")[["Id", "EntryTime", "ExitTime", "Direction", "NetPL", "TradePL", "Commission", "Session", "DayOfWeek"]].round(2)
+    top_best.to_csv(f"{output_dir}/top_best_trades.csv", index=False)
+    
+    # Top Worst Trades
+    top_worst = trades.nsmallest(10, "NetPL")[["Id", "EntryTime", "ExitTime", "Direction", "NetPL", "TradePL", "Commission", "Session", "DayOfWeek"]].round(2)
+    top_worst.to_csv(f"{output_dir}/top_worst_trades.csv", index=False)
+    
+    # Max Win Streak (simplified)
+    trades_sorted = trades.sort_values("EntryTime")
+    win_streaks = []
+    current_streak = 0
+    max_win_streak = 0
+    streak_start = None
+    
+    for _, trade in trades_sorted.iterrows():
+        if trade["NetPL"] > 0:
+            current_streak += 1
+            if current_streak == 1:
+                streak_start = trade["EntryTime"]
+            max_win_streak = max(max_win_streak, current_streak)
+        else:
+            if current_streak > 0:
+                win_streaks.append({
+                    "StartDate": streak_start,
+                    "EndDate": trades_sorted.iloc[trades_sorted.index.get_loc(trade.name) - 1]["ExitTime"],
+                    "Length": current_streak,
+                    "TotalPL": trades_sorted.iloc[trades_sorted.index.get_loc(trade.name) - current_streak:trades_sorted.index.get_loc(trade.name)]["NetPL"].sum()
+                })
+            current_streak = 0
+    
+    if win_streaks:
+        max_win_df = pd.DataFrame(win_streaks).nlargest(5, "Length")
+        max_win_df.to_csv(f"{output_dir}/max_win_streak.csv", index=False)
+    else:
+        pd.DataFrame(columns=["StartDate", "EndDate", "Length", "TotalPL"]).to_csv(f"{output_dir}/max_win_streak.csv", index=False)
+    
+    # Max Loss Streak (simplified)
+    loss_streaks = []
+    current_streak = 0
+    max_loss_streak = 0
+    streak_start = None
+    
+    for _, trade in trades_sorted.iterrows():
+        if trade["NetPL"] < 0:
+            current_streak += 1
+            if current_streak == 1:
+                streak_start = trade["EntryTime"]
+            max_loss_streak = max(max_loss_streak, current_streak)
+        else:
+            if current_streak > 0:
+                loss_streaks.append({
+                    "StartDate": streak_start,
+                    "EndDate": trades_sorted.iloc[trades_sorted.index.get_loc(trade.name) - 1]["ExitTime"],
+                    "Length": current_streak,
+                    "TotalPL": trades_sorted.iloc[trades_sorted.index.get_loc(trade.name) - current_streak:trades_sorted.index.get_loc(trade.name)]["NetPL"].sum()
+                })
+            current_streak = 0
+    
+    if loss_streaks:
+        max_loss_df = pd.DataFrame(loss_streaks).nsmallest(5, "TotalPL")
+        max_loss_df.to_csv(f"{output_dir}/max_loss_streak.csv", index=False)
+    else:
+        pd.DataFrame(columns=["StartDate", "EndDate", "Length", "TotalPL"]).to_csv(f"{output_dir}/max_loss_streak.csv", index=False)
+    
+    print(f"DEBUG: Generated analysis tables in {output_dir}")
+
+# Generate Analysis Tables Footer: Outputs detailed CSV files for web interface.
+
+# =======================================================
+
+# GENERATE DETAILED METRICS AND CHARTS SECTION
+
+# Purpose: Creates comprehensive performance metrics and visualizations for investor reporting.
+
+# Output Goal: Generates detailed metrics JSON and performance charts (equity curve, drawdown, P&L histogram, heatmap).
+
+# For Harrison: These functions create the detailed performance metrics and charts that investors expect to see.
+
+# =======================================================
+def generate_detailed_metrics(trades: pd.DataFrame, output_dir: str) -> dict:
+    """Generates comprehensive performance metrics for detailed analysis."""
+    if trades.empty:
+        return {}
+    
+    print(f"DEBUG: Generating detailed metrics for {len(trades)} trades")
+    
+    # Calculate comprehensive metrics
+    metrics = {}
+    
+    # Basic metrics
+    metrics['num_trades'] = len(trades)
+    metrics['net_profit'] = float(trades['NetPL'].sum())
+    metrics['gross_profit'] = float(trades[trades['NetPL'] > 0]['NetPL'].sum())
+    metrics['gross_loss'] = float(trades[trades['NetPL'] < 0]['NetPL'].sum())
+    metrics['total_return_pct'] = float((trades['NetPL'].sum() / 2500.0) * 100.0)
+    
+    # Win/Loss metrics
+    winning_trades = trades[trades['NetPL'] > 0]
+    losing_trades = trades[trades['NetPL'] < 0]
+    
+    metrics['win_rate_pct'] = float((len(winning_trades) / len(trades)) * 100.0) if len(trades) > 0 else 0.0
+    metrics['avg_win_dollars'] = float(winning_trades['NetPL'].mean()) if len(winning_trades) > 0 else 0.0
+    metrics['avg_loss_dollars'] = float(losing_trades['NetPL'].mean()) if len(losing_trades) > 0 else 0.0
+    metrics['largest_winning_trade'] = float(trades['NetPL'].max())
+    metrics['largest_losing_trade'] = float(trades['NetPL'].min())
+    
+    # Profit factor
+    if abs(metrics['gross_loss']) > 0:
+        metrics['profit_factor'] = float(metrics['gross_profit'] / abs(metrics['gross_loss']))
+    else:
+        metrics['profit_factor'] = float('inf') if metrics['gross_profit'] > 0 else 0.0
+    
+    # Expectancy
+    metrics['expectancy_per_trade_dollars'] = float(trades['NetPL'].mean())
+    
+    # Drawdown calculation
+    equity_curve = 2500.0 + trades['NetPL'].cumsum()
+    running_max = equity_curve.expanding().max()
+    drawdown = equity_curve - running_max
+    metrics['max_drawdown_dollars'] = float(abs(drawdown.min()))
+    metrics['max_drawdown_pct'] = float((metrics['max_drawdown_dollars'] / 2500.0) * 100.0)
+    
+    # Recovery factor
+    if metrics['max_drawdown_dollars'] > 0:
+        metrics['recovery_factor'] = float(metrics['net_profit'] / metrics['max_drawdown_dollars'])
+    else:
+        metrics['recovery_factor'] = 0.0
+    
+    # Sharpe ratio (simplified)
+    if len(trades) > 1:
+        returns = trades['NetPL'] / 2500.0
+        metrics['sharpe_annualized'] = float((returns.mean() / returns.std()) * (252 ** 0.5)) if returns.std() > 0 else 0.0
+    else:
+        metrics['sharpe_annualized'] = 0.0
+    
+    # Session analysis
+    session_analysis = trades.groupby('Session').agg({
+        'NetPL': ['sum', 'count', 'mean']
+    }).round(2)
+    session_analysis.columns = ['Net_PL', 'Trade_Count', 'Avg_PL']
+    session_analysis = session_analysis.reset_index()
+    
+    # Day of week analysis
+    dow_analysis = trades.groupby('DayOfWeek').agg({
+        'NetPL': ['sum', 'count', 'mean']
+    }).round(2)
+    dow_analysis.columns = ['Net_PL', 'Trade_Count', 'Avg_PL']
+    dow_analysis = dow_analysis.reset_index()
+    
+    # Monthly analysis
+    trades['Month'] = trades['EntryTime'].dt.to_period('M')
+    monthly_analysis = trades.groupby('Month').agg({
+        'NetPL': ['sum', 'count', 'mean']
+    }).round(2)
+    monthly_analysis.columns = ['Net_PL', 'Trade_Count', 'Avg_PL']
+    monthly_analysis = monthly_analysis.reset_index()
+    monthly_analysis['Month'] = monthly_analysis['Month'].astype(str)
+    
+    # Save detailed metrics
+    detailed_metrics = {
+        'basic_metrics': metrics,
+        'session_analysis': session_analysis.to_dict('records'),
+        'dow_analysis': dow_analysis.to_dict('records'),
+        'monthly_analysis': monthly_analysis.to_dict('records')
+    }
+    
+    # Save to JSON
+    import json
+    with open(f"{output_dir}/detailed_metrics.json", "w") as f:
+        json.dump(detailed_metrics, f, indent=2)
+    
+    print(f"DEBUG: Generated detailed metrics in {output_dir}")
+    return detailed_metrics
+
+def generate_performance_charts(trades: pd.DataFrame, output_dir: str) -> dict:
+    """Generates performance charts for visualization."""
+    if trades.empty:
+        return {}
+    
+    print(f"DEBUG: Generating performance charts for {len(trades)} trades")
+    
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from datetime import datetime
+    import base64
+    import io
+    
+    # Set up matplotlib for serverless environment
+    plt.switch_backend('Agg')
+    plt.style.use('default')
+    
+    charts = {}
+    
+    try:
+        # Equity Curve
+        equity_curve = 2500.0 + trades['NetPL'].cumsum()
+        plt.figure(figsize=(12, 6))
+        plt.plot(trades['EntryTime'], equity_curve, linewidth=2, color='#2E86AB')
+        plt.title('Equity Curve', fontsize=16, fontweight='bold')
+        plt.xlabel('Date')
+        plt.ylabel('Portfolio Value ($)')
+        plt.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+        # Save as base64
+        buffer = io.BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
+        buffer.seek(0)
+        charts['equity_curve'] = base64.b64encode(buffer.getvalue()).decode()
+        plt.close()
+        
+        # Drawdown Curve
+        running_max = equity_curve.expanding().max()
+        drawdown = equity_curve - running_max
+        plt.figure(figsize=(12, 6))
+        plt.fill_between(trades['EntryTime'], drawdown, 0, color='#E63946', alpha=0.7)
+        plt.plot(trades['EntryTime'], drawdown, color='#E63946', linewidth=1)
+        plt.title('Drawdown Curve', fontsize=16, fontweight='bold')
+        plt.xlabel('Date')
+        plt.ylabel('Drawdown ($)')
+        plt.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+        buffer = io.BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
+        buffer.seek(0)
+        charts['drawdown_curve'] = base64.b64encode(buffer.getvalue()).decode()
+        plt.close()
+        
+        # P&L Histogram
+        plt.figure(figsize=(10, 6))
+        plt.hist(trades['NetPL'], bins=20, alpha=0.7, color='#2E86AB', edgecolor='black')
+        plt.axvline(x=0, color='red', linestyle='--', linewidth=2)
+        plt.title('P&L Distribution', fontsize=16, fontweight='bold')
+        plt.xlabel('Net P&L ($)')
+        plt.ylabel('Frequency')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        buffer = io.BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
+        buffer.seek(0)
+        charts['pl_histogram'] = base64.b64encode(buffer.getvalue()).decode()
+        plt.close()
+        
+        # Day/Hour Heatmap (simplified)
+        trades['DayOfWeek'] = trades['EntryTime'].dt.day_name()
+        trades['Hour'] = trades['EntryTime'].dt.hour
+        
+        pivot_data = trades.pivot_table(values='NetPL', index='DayOfWeek', columns='Hour', aggfunc='sum', fill_value=0)
+        
+        plt.figure(figsize=(12, 8))
+        plt.imshow(pivot_data.values, cmap='RdYlGn', aspect='auto')
+        plt.colorbar(label='Net P&L ($)')
+        plt.title('Performance Heatmap (Day vs Hour)', fontsize=16, fontweight='bold')
+        plt.xlabel('Hour of Day')
+        plt.ylabel('Day of Week')
+        plt.xticks(range(len(pivot_data.columns)), pivot_data.columns)
+        plt.yticks(range(len(pivot_data.index)), pivot_data.index)
+        plt.tight_layout()
+        
+        buffer = io.BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
+        buffer.seek(0)
+        charts['heatmap'] = base64.b64encode(buffer.getvalue()).decode()
+        plt.close()
+        
+        print(f"DEBUG: Generated performance charts in {output_dir}")
+        
+        # Save charts as JSON
+        import json
+        with open(f"{output_dir}/charts.json", "w") as f:
+            json.dump(charts, f)
+        
+    except Exception as e:
+        print(f"WARNING: Could not generate charts: {str(e)}")
+        charts = {}
+    
+    return charts
+
+# Generate Detailed Metrics and Charts Footer: Outputs comprehensive analysis for investor reporting.
+
+# =======================================================
 
 # MAIN EXECUTION SECTION# Purpose: Entry point for running the backtest from the command line.
 

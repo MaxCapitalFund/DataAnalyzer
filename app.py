@@ -44,6 +44,11 @@ async def read_root():
     with open("static/index.html", "r") as f:
         return HTMLResponse(content=f.read())
 
+@app.get("/api/test")
+async def test_endpoint():
+    """Test endpoint to verify API is working"""
+    return {"status": "ok", "message": "API is working", "timestamp": "2025-10-20T01:00:00Z"}
+
 @app.post("/api/analyze")
 async def analyze_csv(
     file: UploadFile = File(...),
@@ -130,11 +135,11 @@ async def analyze_csv(
             else:
                 backtest_dirs = []
         else:
-            # Local development - look in Backtests directory
-            output_base_dir = run_cwd / 'Backtests'
+            # Local development - look in /tmp for backtester v1.4.6
+            output_base_dir = Path('/tmp')
             if not output_base_dir.exists():
-                raise Exception(f'Backtests directory not found at {output_base_dir}')
-            backtest_dirs = [d for d in output_base_dir.iterdir() if d.is_dir()]
+                raise Exception(f'/tmp directory not found')
+            backtest_dirs = [d for d in output_base_dir.iterdir() if d.is_dir() and d.name.startswith('Backtests_')]
         
         if not backtest_dirs:
             raise Exception(f'No backtest output directories found. Debug info: {debug_info}')
@@ -144,13 +149,44 @@ async def analyze_csv(
         # Read results
         results = {}
         
-        # Read metrics
+        # Read metrics - backtester v1.4.6 doesn't create metrics.json, extract from analytics.md
         metrics_file = latest_dir / 'metrics.json'
         if metrics_file.exists():
             with open(metrics_file) as f:
                 metrics_data = json.load(f)
                 # Clean NaN values from metrics
                 results['metrics'] = clean_nan_values(metrics_data)
+        else:
+            # Extract metrics from analytics.md for backtester v1.4.6
+            analytics_file = latest_dir / 'analytics.md'
+            if analytics_file.exists():
+                with open(analytics_file) as f:
+                    analytics_content = f.read()
+                    # Extract metrics from analytics.md
+                    metrics = {}
+                    lines = analytics_content.split('\n')
+                    for line in lines:
+                        if '**Total Trades:**' in line:
+                            metrics['num_trades'] = int(line.split('**Total Trades:**')[1].strip())
+                        elif '**Net Profit:**' in line:
+                            profit_str = line.split('**Net Profit:**')[1].strip().replace('$', '').replace(',', '')
+                            metrics['net_profit'] = float(profit_str)
+                        elif '**Total Return:**' in line:
+                            return_str = line.split('**Total Return:**')[1].strip().replace('%', '')
+                            metrics['total_return_pct'] = float(return_str)
+                        elif '**Win Rate:**' in line:
+                            winrate_str = line.split('**Win Rate:**')[1].strip().split('%')[0]
+                            metrics['win_rate_pct'] = float(winrate_str)
+                        elif '**Profit Factor:**' in line:
+                            pf_str = line.split('**Profit Factor:**')[1].strip()
+                            if pf_str == 'inf':
+                                metrics['profit_factor'] = float('inf')
+                            else:
+                                metrics['profit_factor'] = float(pf_str)
+                        elif '**Max Drawdown:**' in line:
+                            dd_str = line.split('**Max Drawdown:**')[1].strip().split('(')[0].replace('$', '').replace(',', '')
+                            metrics['max_drawdown_dollars'] = float(dd_str)
+                    results['metrics'] = clean_nan_values(metrics)
         
         # Read analytics markdown
         analytics_file = latest_dir / 'analytics.md'
@@ -167,7 +203,7 @@ async def analyze_csv(
             df = df.fillna('')
             return df.to_dict('records')
         
-        # Read all CSV data
+        # Read all CSV data - backtester v1.4.6 only creates trades_enriched.csv
         results['data'] = {
             'monthly_performance': read_csv_as_json(latest_dir / 'monthly_performance.csv'),
             'dow_kpis': read_csv_as_json(latest_dir / 'dow_kpis.csv'),
@@ -179,6 +215,21 @@ async def analyze_csv(
             'max_loss_streak': read_csv_as_json(latest_dir / 'max_loss_streak_trades.csv')
         }
         
+        # For backtester v1.4.6, also add trades data
+        trades_file = latest_dir / 'trades_enriched.csv'
+        if trades_file.exists():
+            trades_data = read_csv_as_json(trades_file)
+            results['trades_rth_count'] = len(trades_data)
+            if trades_data and len(trades_data) > 0:
+                results['strategy_name'] = trades_data[0]['BaseStrategy']
+        
+        # Read detailed metrics if available
+        detailed_metrics_file = latest_dir / 'detailed_metrics.json'
+        if detailed_metrics_file.exists():
+            with open(detailed_metrics_file) as f:
+                detailed_metrics = json.load(f)
+                results['detailed_metrics'] = detailed_metrics
+        
         # Helper function to read images as base64
         def read_image_as_base64(file_path):
             if not file_path.exists():
@@ -187,13 +238,24 @@ async def analyze_csv(
                 img_data = f.read()
                 return f"data:image/png;base64,{base64.b64encode(img_data).decode()}"
         
-        # Read charts
-        results['charts'] = {
-            'equity_curve': read_image_as_base64(latest_dir / 'equity_curve_180d.png'),
-            'drawdown_curve': read_image_as_base64(latest_dir / 'drawdown_curve.png'),
-            'pl_histogram': read_image_as_base64(latest_dir / 'pl_histogram.png'),
-            'heatmap': read_image_as_base64(latest_dir / 'heatmap_dow_hour_count.png')
-        }
+        # Read charts - try new chart generation first, fallback to old files
+        charts = {}
+        
+        # Try to read from new chart generation (base64 encoded in JSON)
+        charts_json_file = latest_dir / 'charts.json'
+        if charts_json_file.exists():
+            with open(charts_json_file) as f:
+                charts = json.load(f)
+        else:
+            # Fallback to old image files
+            charts = {
+                'equity_curve': read_image_as_base64(latest_dir / 'equity_curve_180d.png'),
+                'drawdown_curve': read_image_as_base64(latest_dir / 'drawdown_curve.png'),
+                'pl_histogram': read_image_as_base64(latest_dir / 'pl_histogram.png'),
+                'heatmap': read_image_as_base64(latest_dir / 'heatmap_dow_hour_count.png')
+            }
+        
+        results['charts'] = charts
         
         # Count trades
         trades_file = latest_dir / 'trades_enriched.csv'
