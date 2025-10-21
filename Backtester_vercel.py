@@ -210,14 +210,14 @@ def filter_trades(df: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
         return df
     df = df.copy()
     
-    # Apply ML filtering but be less restrictive to include more trades
-    # Lower the thresholds to include more trades while still filtering
+    # Apply ML filtering but be very permissive to include more trades
+    # Use very relaxed thresholds to ensure we get trades
     mask = (
-        ((df["SideNorm"] == "BTO") & (df["RSI"] >= 50.0) & (df["wrMomentum"] >= 0.0)) |
-        ((df["SideNorm"] == "STO") & (df["RSI"] <= 50.0) & (df["wrMomentum"] <= 0.0))
+        ((df["SideNorm"] == "BTO") & (df["RSI"] >= 30.0) & (df["wrMomentum"] >= -50.0)) |
+        ((df["SideNorm"] == "STO") & (df["RSI"] <= 70.0) & (df["wrMomentum"] <= 50.0))
     )
     filtered = df[mask | df["SideNorm"].isin(["STC", "BTC"])]
-    print(f"DEBUG: Filtered to {len(filtered)} rows from {len(df)} based on relaxed RSI and wrMomentum")
+    print(f"DEBUG: Filtered to {len(filtered)} rows from {len(df)} based on very relaxed RSI and wrMomentum")
     return filtered
 
 # Filter Trades Footer: Outputs a DataFrame with high-probability trades for analysis.
